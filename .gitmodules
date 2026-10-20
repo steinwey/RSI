@@ -1,0 +1,12 @@
+[submodule "reasoning-bank"]
+	path = vendor/reasoning-bank
+	url = https://github.com/google-research/reasoning-bank.git
+[submodule "EvoArena"]
+	path = vendor/EvoArena
+	url = https://github.com/Aiden0526/EvoArena.git
+[submodule "SWE-bench"]
+	path = vendor/SWE-bench
+	url = https://github.com/SWE-bench/SWE-bench.git
+[submodule "harbor"]
+	path = vendor/harbor
+	url = https://github.com/harbor-framework/harbor.git

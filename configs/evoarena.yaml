@@ -1,0 +1,36 @@
+# Same model/budgets as deepseek.yaml, using official SWE-Chain-Evo task chains.
+model:
+  name: deepseek/deepseek-flash
+  extra_body:
+    thinking:
+      type: disabled
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 120
+  num_retries: 2
+judge_model:
+  name: deepseek/deepseek-flash
+  extra_body:
+    thinking:
+      type: disabled
+  temperature: 0.0
+  max_tokens: 8192
+  timeout: 180
+  num_retries: 2
+rollouts: 5
+step_limit: 80
+cost_limit: 3.0
+command_timeout: 60
+image_pull_timeout: 7200
+rollout_timeout: 1800
+evaluation_timeout: 1800
+evidence_chars: 16000
+swe_dataset: Aiden0526/SWE-Chain-Evo
+swe_split: validation
+gate_image: python:3.12-slim
+terminal_artifacts: []
+evolve: true
+embedding_model: null
+# Upload is controlled by run --wandb / --no-wandb, default off.
+wandb:
+  project: rsi

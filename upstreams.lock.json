@@ -1,0 +1,18 @@
+{
+  "reasoning-bank": {
+    "url": "https://github.com/google-research/reasoning-bank.git",
+    "commit": "ed80611788292ea739f1effd31f16c53823b8a0d"
+  },
+  "EvoArena": {
+    "url": "https://github.com/Aiden0526/EvoArena.git",
+    "commit": "17983e68eeaa26e78575566836aa679ea6b6bf80"
+  },
+  "SWE-bench": {
+    "url": "https://github.com/SWE-bench/SWE-bench.git",
+    "commit": "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e"
+  },
+  "harbor": {
+    "url": "https://github.com/harbor-framework/harbor.git",
+    "commit": "357c5e74020fc0890d69fb3a7db610896b9ce57d"
+  }
+}

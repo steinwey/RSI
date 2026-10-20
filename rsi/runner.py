@@ -1,0 +1,263 @@
+import copy
+import json
+import runpy
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import yaml
+from . import ROOT, UPSTREAM
+from .backends import install_skill, make_backend
+from .common import file_map, safe_id, write_json
+from .memory import MemoryBank
+from .model import Model
+from .skills import SkillStore, accept_metrics, functional_gate
+from .tracking import start_wandb, summary_metrics
+from .run_logs import create_run_directory, update_run
+
+
+def public_rollout(result):
+    # Explicit allowlist: verifier feedback never reaches selection or induction.
+    return {key: result[key] for key in ("rollout", "status", "messages", "artifact", "error")}
+
+
+def bounded_evidence(results, char_limit):
+    evidence = [public_rollout(r) for r in results]
+    for item in evidence:
+        text = json.dumps(item["messages"], ensure_ascii=False)
+        if len(text) > char_limit:
+            item["messages"] = {"truncated": True, "head": text[:char_limit//2], "tail": text[-char_limit//2:]}
+        item["artifact"] = item["artifact"][:char_limit]
+    return evidence
+
+
+def execute_one(task, index, folder, skill, memory, config, backend_factory=make_backend,
+                model_factory=Model):
+    from minisweagent.agents.default import DefaultAgent, LimitsExceeded
+    folder.mkdir(parents=True, exist_ok=False)
+    start = time.monotonic()
+    backend = agent = model = None
+    result = {"rollout": index, "status": "error", "messages": [], "artifact": "", "error": None,
+              "skill_version": skill.name}
+    try:
+        backend = backend_factory(task, folder, config)
+        install_skill(backend.env, skill)
+        model = model_factory(config["model"])
+        settings = yaml.safe_load((UPSTREAM / "third_party/src/minisweagent/config/extra/swebench.yaml").read_text(encoding="utf-8"))["agent"]
+        settings.update(step_limit=config["step_limit"], cost_limit=config["cost_limit"])
+        if task["benchmark"] == "terminal":
+            settings["instance_template"] = ("Task: {{task}}\nWork in the current terminal environment. "
+                "When finished, run: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+        deadline = time.monotonic() + min(config["rollout_timeout"], task.get("timeout", config["rollout_timeout"]))
+        class TimedAgent(DefaultAgent):
+            def step(self):
+                if time.monotonic() >= deadline:
+                    raise LimitsExceeded("Rollout wall-time budget exhausted")
+                return super().step()
+        agent = TimedAgent(model, backend.env, **settings)
+        context = json.dumps(memory, ensure_ascii=False) + "\n\nSkill (installed at /opt/rsi-skills):\n" + (skill / "SKILL.md").read_text(encoding="utf-8")
+        result["status"], result["submission"] = agent.run(task["prompt"], selected_memory=context)
+        result["artifact"] = backend.artifact()
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        result["messages"] = copy.deepcopy(agent.messages) if agent else []
+        result["usage"] = model.stats() if model else {"input_tokens": 0, "output_tokens": 0, "calls": 0, "cost_usd": 0}
+        result["seconds"] = time.monotonic() - start
+        result["skill_called"] = any("/opt/rsi-skills/scripts/" in m.get("content", "") for m in result["messages"] if m["role"] == "assistant")
+        try:
+            write_json(folder / "trajectory.json", result)
+        except BaseException:
+            if backend:
+                backend.close()
+            raise
+    return result, backend
+
+
+def run_group(task, folder, skill, memory, config, *, backend_factory=make_backend,
+              model_factory=Model):
+    """Five independent environments, then one selected result; always clean up all five."""
+    folder.mkdir(parents=True, exist_ok=False)
+    start = time.monotonic()
+    pairs = []
+    try:
+        with ThreadPoolExecutor(max_workers=config["rollouts"]) as pool:
+            futures = [pool.submit(execute_one, task, i, folder / f"rollout-{i}", skill, memory,
+                                   config, backend_factory, model_factory) for i in range(config["rollouts"])]
+            # Preserve completed handles even if an unexpected worker error occurs.
+            failures = []
+            for future in futures:
+                try:
+                    pairs.append(future.result())
+                except Exception as exc:
+                    failures.append(exc)
+            if failures:
+                raise RuntimeError(f"Unexpected worker failure: {failures[0]}")
+        results = [r for r, _ in pairs]
+        valid = [r for r in results if r["error"] is None]
+        if not valid:
+            write_json(folder / "group-error.json", {"error": "All rollouts failed", "rollouts": results})
+            raise RuntimeError(f"All rollouts failed: inspect {folder}")
+        selector = model_factory(config["judge_model"])
+        selection = selector.object(
+            'Choose the best available solution using the task, visible execution evidence and visible tests. '
+            'Exit status alone is not proof of correctness. Return {"rollout": integer, "reason": string}.',
+            {"task": task["prompt"], "trajectories": bounded_evidence(valid, config["evidence_chars"])} )
+        chosen = selection.get("rollout")
+        if type(chosen) is not int or chosen not in {r["rollout"] for r in valid}:
+            raise ValueError("Selector returned an invalid rollout")
+        write_json(folder / "selection.json", selection)
+        picked, backend = pairs[chosen]
+        if task["benchmark"] in ("swe", "swe-evo"):
+            write_json(folder / "predictions.json", [{"instance_id": task["id"],
+                "model_name_or_path": config["model"]["name"], "model_patch": picked["artifact"]}])
+        # No verifier is invoked until selection is durably written.
+        try:
+            score = backend.score(picked["artifact"])
+        except Exception as exc:
+            score = {"success": None, "error": f"{type(exc).__name__}: {exc}"}
+        write_json(folder / "score.json", score)
+        selector_stats = selector.stats()
+        input_tokens = sum(r["usage"]["input_tokens"] for r in results) + selector_stats["input_tokens"]
+        output_tokens = sum(r["usage"]["output_tokens"] for r in results) + selector_stats["output_tokens"]
+        report = {"task_id": task["id"], "selected": chosen, "success": score["success"],
+                  "input_tokens": input_tokens, "output_tokens": output_tokens,
+                  "tokens": input_tokens + output_tokens, "seconds": time.monotonic()-start,
+                  "skill_version": skill.name, "selector_usage": selector_stats}
+        if task.get("chain"):
+            report["chain"] = task["chain"]
+        write_json(folder / "summary.json", report)
+        return report, results
+    finally:
+        for _, backend in pairs:
+            if backend:
+                try:
+                    backend.close()
+                except Exception as exc:
+                    with (folder / "cleanup-errors.log").open("a", encoding="utf-8") as fh:
+                        fh.write(str(exc) + "\n")
+
+
+def induce(task, results, skill, config, model_factory=Model):
+    # Reuse the paper's actual parallel self-contrast prompt, adapting domain and format.
+    prompt = runpy.run_path(str(UPSTREAM / "WebArena/prompts/memory_instruction.py"))["PARALLEL_SI"]
+    prompt = prompt.split("## Output Format")[0].replace("web navigation", "software and terminal tasks")
+    prompt += ('\nReturn {"memory_items": [{"title": str, "description": str, "content": str}], '
+               '"changes": {"SKILL.md": "complete new contents", "scripts/inspect_project.py": "complete new contents"}, '
+               '"reason": str, "evidence_rollouts": [int]}. At most five memory items. '
+               'changes may be empty. Only include files needing improvement. Preserve the inspect_project CLI and JSON schema. '
+               'Do not store task-specific answers, patches, paths or identifiers in reusable skills. '
+               'Distinguish self-assessed success from verified success. You have no hidden test feedback. '
+               'Skill code is read-only project inspection; never execute project code, install packages or use the network.')
+    model = model_factory(config["judge_model"])
+    proposal = model.object(prompt, {"task": task["prompt"],
+        "trajectories": bounded_evidence(results, config["evidence_chars"]),
+        "current_skill": {k: v for k, v in file_map(skill).items() if k in ("SKILL.md", "scripts/inspect_project.py")}})
+    items = proposal.get("memory_items", [])
+    if not isinstance(items, list) or len(items) > 5 or any(not isinstance(x, dict) or
+            any(not isinstance(x.get(k), str) for k in ("title", "description", "content")) for x in items):
+        raise ValueError("Invalid memory items")
+    proposal["usage"] = model.stats()
+    return proposal
+
+
+def run_experiment(tasks, validation, config, output=None, *, runs_dir=None, label=None):
+    from .evo_swe import validate_order
+    validate_order(tasks, validation)
+    ids = [task["id"] for task in tasks]
+    validation_ids = [task["id"] for task in validation]
+    if len(set(ids)) != len(ids) or len(set(validation_ids)) != len(validation_ids):
+        raise ValueError("Duplicate task IDs")
+    if set(ids) & set(validation_ids):
+        raise ValueError("Validation and evaluation tasks must be disjoint")
+    output = create_run_directory(tasks, validation, config, output, runs_dir=runs_dir, label=label)
+    print(f"Run output: {output}", flush=True)
+    print(f"Log index: {output.parent / 'INDEX.md'}", flush=True)
+    try:
+        reports = _run_experiment(tasks, validation, config, output)
+    except BaseException as exc:
+        status = "failed" if isinstance(exc, Exception) else "interrupted"
+        update_run(output, status=status, error=f"{type(exc).__name__}: {exc}")
+        raise
+    scored = [report for report in reports if report.get("success") is not None]
+    update_run(output, status="completed" if len(scored) == len(reports) else "unscored",
+               completed_tasks=len(reports), scored_tasks=len(scored),
+               resolved=sum(bool(report["success"]) for report in scored))
+    return reports
+
+
+def _run_experiment(tasks, validation, config, output):
+    write_json(output / "config.json", config)
+    metadata_fields = ("id", "benchmark", "dataset_fingerprint", "path", "chain")
+    write_json(output / "tasks.json", [{k: t[k] for k in metadata_fields if k in t} for t in tasks])
+    write_json(output / "validation-tasks.json", [{k: t[k] for k in metadata_fields if k in t} for t in validation])
+    write_json(output / "upstreams.lock.json", json.loads((ROOT / "upstreams.lock.json").read_text()))
+    contexts = {}
+    summaries = []
+    write_json(output / "metrics.json", summary_metrics(summaries))
+    tracker = start_wandb(config, output)
+    try:
+        for task in tasks:
+            task_dir = output / safe_id(task["id"])
+            scope = output / "chains" / safe_id(task["chain"]["id"]) if task.get("chain") else output
+            if scope not in contexts:
+                contexts[scope] = (SkillStore(scope / "skills", ROOT / "skills/test-and-diagnose"),
+                                   MemoryBank(scope / "memory.json", config.get("embedding_model")))
+            store, bank = contexts[scope]
+            skill = store.current()
+            memory = bank.retrieve(task["prompt"])
+            write_json(output / "retrieval" / f'{safe_id(task["id"])}.json', memory)
+            report, results = run_group(task, task_dir, skill, memory, config)
+            summaries.append(report)
+            candidate = None
+            proposal = None
+            update = {"accepted": False}
+            try:
+                proposal = induce(task, results, skill, config)
+                write_json(task_dir / "proposal.json", proposal)
+                items = proposal.get("memory_items", [])
+                bank.add(task["id"], task["prompt"], items)
+                update = {"accepted": False, "memory_items": len(items),
+                          "reason": "fixed-skill mode or no proposed changes"}
+                if not config["evolve"] or not proposal.get("changes"):
+                    continue
+                candidate, diff = store.propose(proposal["changes"])
+                (task_dir / "skill.diff").write_text(diff, encoding="utf-8")
+                evidence = {"reason": proposal.get("reason"), "task_id": task["id"],
+                            "evidence_rollouts": proposal.get("evidence_rollouts", []), "diff": diff}
+                gate = functional_gate(candidate, ROOT / "skills/test-and-diagnose/tests", config["gate_image"])
+                evidence["functional_gate"] = gate
+                accepted = False
+                if gate["passed"] and validation and candidate != skill:
+                    baseline, changed = [], []
+                    for vtask in validation:
+                        # Identical frozen experience for both arms; validation never writes memory.
+                        vmemory = [] if vtask.get("chain") else bank.retrieve(vtask["prompt"])
+                        base, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "baseline", skill, vmemory, config)
+                        new, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "candidate", candidate, vmemory, config)
+                        baseline.append(base)
+                        changed.append(new)
+                    accepted = accept_metrics(baseline, changed)
+                    evidence["validation"] = {"baseline": baseline, "candidate": changed}
+                else:
+                    evidence["validation_skipped"] = "gate failed, no validation tasks, or unchanged candidate"
+                store.record(candidate, accepted, evidence)
+                update = {"accepted": accepted, "memory_items": len(items), **evidence}
+            except Exception as exc:
+                if candidate is not None:
+                    store.record(candidate, False, {"task_id": task["id"], "error": f"{type(exc).__name__}: {exc}"})
+                update = {"accepted": False, "error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                if proposal is not None and "usage" in proposal:
+                    update["updater_usage"] = proposal["usage"]
+                write_json(task_dir / "update.json", update)
+                write_json(output / "summary.json", summaries)
+                write_json(output / "metrics.json", summary_metrics(summaries))
+                update_run(output, completed_tasks=len(summaries), current_skill_version=store.current().name)
+                if task.get("chain"):
+                    update_run(output, current_chain=task["chain"]["id"],
+                               chain_skill_versions={path.name: context[0].current().name for path, context in contexts.items()})
+                tracker.log_task(task, report, update)
+        tracker.log_summary(summaries)
+        return summaries
+    finally:
+        tracker.finish()
