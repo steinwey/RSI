@@ -80,6 +80,18 @@ class CoreTests(unittest.TestCase):
     def group(self):
         return run_group(self.task, self.root / "group", self.store.current(), [], self.config,
                          backend_factory=FakeBackend, model_factory=FakeModel)
+    def test_selector_request_saved_before_provider_failure_and_cleanup(self):
+        from rsi.common import read_json
+        from rsi.model import object_messages
+        def fail(instruction, data):
+            request = read_json(self.root / "group/evidence/selector.json")
+            self.assertEqual(request, object_messages(instruction, data))
+            raise RuntimeError("provider unavailable")
+        with patch.object(FakeModel, "object", side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+                self.group()
+        self.assertTrue(all(x.closed for x in FakeBackend.instances))
+        self.assertFalse(any(x.scored for x in FakeBackend.instances))
     def test_five_parallel_upstream_agents_select_only_one(self):
         report, results = self.group()
         self.assertEqual(len(results), 5)
@@ -220,6 +232,12 @@ class CoreTests(unittest.TestCase):
         script = _POSIX_TEXT.split("sys.argv", 1)[0] + f"pathlib.Path({str(target)!r}).write_text('set -e\\n')"
         subprocess.run([sys.executable, "-c", script], check=True)
         self.assertNotIn(b"\r", target.read_bytes())
+        raw = self.root / "utf8.json"
+        raw.write_bytes('{"x":"“"}'.encode())
+        shown = subprocess.run([sys.executable, "-c", _POSIX_TEXT.split("sys.argv", 1)[0]
+                                + f"print(pathlib.Path({str(raw)!r}).read_text())"],
+                               check=True, capture_output=True, text=True)
+        self.assertIn("“", shown.stdout)
 
     def test_gate_timeout_removes_container(self):
         import subprocess

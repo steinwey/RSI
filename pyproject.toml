@@ -14,3 +14,11 @@ rsi = "rsi.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["rsi*"]
+
+# rsi/__init__.py puts the vendored upstreams on sys.path at runtime; mirror that for static analysis.
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv-py314"
+extraPaths = ["vendor/reasoning-bank/third_party/src", "vendor/harbor/src", "vendor/SWE-bench"]
+exclude = ["vendor", "runs", "datasets", ".venv", ".venv-py314"]
+typeCheckingMode = "standard"

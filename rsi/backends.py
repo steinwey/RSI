@@ -44,6 +44,10 @@ _POSIX_TEXT = (
     "def write_text(self,data,encoding=None,errors=None,newline=None):\n"
     "    return _write(self,data,encoding=encoding,errors=errors,newline='\\n' if newline is None else newline)\n"
     "pathlib.Path.write_text=write_text\n"
+    "_read=pathlib.Path.read_text\n"
+    "def read_text(self,encoding=None,errors=None):\n"
+    "    return _read(self,encoding='utf-8' if encoding is None else encoding,errors=errors)\n"
+    "pathlib.Path.read_text=read_text\n"
     "sys.argv=['swebench.harness.run_evaluation',*sys.argv[1:]]\n"
     "runpy.run_module('swebench.harness.run_evaluation', run_name='__main__')\n"
 )

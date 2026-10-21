@@ -18,13 +18,12 @@ judge_model:
   timeout: 180
   num_retries: 2
 rollouts: 5
-step_limit: 80
+step_limit: 30
 cost_limit: 3.0
 command_timeout: 60
 image_pull_timeout: 7200
 rollout_timeout: 1800
 evaluation_timeout: 1800
-evidence_chars: 16000
 swe_dataset: Aiden0526/SWE-Chain-Evo
 swe_split: validation
 gate_image: python:3.12-slim

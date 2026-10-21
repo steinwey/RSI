@@ -3,7 +3,7 @@ import os
 
 TRACKED_KEYS = (
     "rollouts", "step_limit", "cost_limit", "command_timeout", "image_pull_timeout", "rollout_timeout",
-    "evaluation_timeout", "evidence_chars", "swe_dataset", "swe_split", "gate_image",
+    "evaluation_timeout", "swe_dataset", "swe_split", "gate_image",
     "evolve", "embedding_model",
 )
 

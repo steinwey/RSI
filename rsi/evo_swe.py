@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -17,8 +18,13 @@ IMAGE_DATASET = "zhiyuanhucs/SWE-EVO-50chain-images"
 IMAGE_REVISION = "b73f94440a191aa2f7c47cdd83747e6f8b8cfa0b"
 
 
+def hub_endpoint():
+    """Domestic mirror by default. Set HF_ENDPOINT=https://huggingface.co to use the origin."""
+    return os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+
+
 def _fetch(path, repo=DATASET, revision=REVISION):
-    url = f"https://huggingface.co/datasets/{repo}/resolve/{revision}/{path}"
+    url = f"{hub_endpoint()}/datasets/{repo}/resolve/{revision}/{path}"
     with urllib.request.urlopen(url, timeout=30) as response:
         return response.read()
 
@@ -239,7 +245,7 @@ def _download_image(path, metadata, timeout):
             offset = 0
             part.write_bytes(b"")
         request = urllib.request.Request(
-            f"https://huggingface.co/datasets/{IMAGE_DATASET}/resolve/{IMAGE_REVISION}/{metadata['path']}",
+            f"{hub_endpoint()}/datasets/{IMAGE_DATASET}/resolve/{IMAGE_REVISION}/{metadata['path']}",
             headers={"Range": f"bytes={offset}-"} if offset else {})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -279,7 +285,7 @@ def prepare_images(tasks, cache, timeout=7200):
             if archives is None:
                 index = cache / f"archive-index-{IMAGE_REVISION}.json"
                 if not index.exists():
-                    url = f"https://huggingface.co/api/datasets/{IMAGE_DATASET}/tree/{IMAGE_REVISION}/images"
+                    url = f"{hub_endpoint()}/api/datasets/{IMAGE_DATASET}/tree/{IMAGE_REVISION}/images"
                     with urllib.request.urlopen(url, timeout=30) as response:
                         write_json(index, json.load(response))
                 archives = {item["path"]: item for item in read_json(index)}

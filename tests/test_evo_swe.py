@@ -13,7 +13,7 @@ from rsi import ROOT
 from rsi.cli import load_config, load_tasks, main
 from rsi.backends import SWEChainBackend
 from rsi.common import read_json, write_json
-from rsi.evo_swe import (_download_image, evaluation_rows, prepare_tasks,
+from rsi.evo_swe import (_download_image, evaluation_rows, hub_endpoint, prepare_tasks,
                          prepare_images, validate_order, validate_tasks, verify_references)
 from rsi.runner import run_experiment
 from rsi.tracking import chain_metrics
@@ -160,6 +160,7 @@ class EvoSWETests(unittest.TestCase):
             _download_image(path, metadata, 60)
         self.assertEqual(path.read_bytes(), content)
         self.assertEqual(urlopen.call_args.args[0].get_header("Range"), "bytes=10-")
+        self.assertTrue(urlopen.call_args.args[0].full_url.startswith(f"{hub_endpoint()}/datasets/"))
         self.assertFalse(path.with_suffix(".tar.part").exists())
 
     def test_cached_images_need_no_huggingface_network_connection(self):

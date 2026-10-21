@@ -1,11 +1,24 @@
 import difflib
+import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from .common import digest, file_map, read_json, write_json
 
-ALLOWED = {"SKILL.md", "scripts/inspect_project.py"}
+SCRIPT_PATH = re.compile(r"scripts/[A-Za-z][A-Za-z0-9_]{0,40}\.py")
+REQUIRED = {"SKILL.md", "scripts/inspect_project.py"}
+MAX_SCRIPTS = 8
+MAX_FILE_CHARS = 60000
+
+
+def editable(path):
+    return path == "SKILL.md" or bool(SCRIPT_PATH.fullmatch(path))
+
+
+def skill_files(skill):
+    """Files the updater may read and replace: the guide and the scripts, never the fixed checks."""
+    return {k: v for k, v in file_map(skill).items() if editable(k)}
 
 
 class SkillStore:
@@ -31,17 +44,25 @@ class SkillStore:
         return self.root / "versions" / version
 
     def propose(self, changes):
-        if not isinstance(changes, dict) or set(changes) - ALLOWED:
-            raise ValueError("Only SKILL.md and scripts/inspect_project.py may be changed")
-        if any(not isinstance(text, str) or len(text) > 60000 for text in changes.values()):
-            raise ValueError("Skill files must be text shorter than 60000 characters")
+        if not isinstance(changes, dict) or not all(isinstance(p, str) and editable(p) for p in changes):
+            raise ValueError("Only SKILL.md and scripts/<name>.py may be changed")
+        if any(text is not None and (not isinstance(text, str) or len(text) > MAX_FILE_CHARS)
+               for text in changes.values()):
+            raise ValueError(f"Skill files must be text shorter than {MAX_FILE_CHARS} characters, or null to delete")
+        deleted = {p for p, text in changes.items() if text is None}
+        if deleted & REQUIRED:
+            raise ValueError("SKILL.md and scripts/inspect_project.py cannot be deleted")
         old = file_map(self.current())
-        new = old | changes
-        if not new.get("SKILL.md", "").strip():
+        new = {p: v for p, v in (old | changes).items() if p not in deleted}
+        if not new["SKILL.md"].strip():
             raise ValueError("Skill description cannot be empty")
-        compile(new["scripts/inspect_project.py"], "inspect_project.py", "exec")
+        scripts = sorted(p for p in new if SCRIPT_PATH.fullmatch(p))
+        if len(scripts) > MAX_SCRIPTS:
+            raise ValueError(f"At most {MAX_SCRIPTS} skill scripts are allowed")
+        for path in scripts:
+            compile(new[path], path, "exec")
         version = self.materialize(new)
-        diff = "\n".join("\n".join(difflib.unified_diff(old.get(p, "").splitlines(), new[p].splitlines(),
+        diff = "\n".join("\n".join(difflib.unified_diff(old.get(p, "").splitlines(), new.get(p, "").splitlines(),
                          fromfile=f"old/{p}", tofile=f"new/{p}", lineterm="")) for p in sorted(changes))
         return self.root / "versions" / version, diff
 
@@ -68,7 +89,7 @@ def functional_gate(candidate, fixed_tests, image="python:3.12-slim"):
                "-v", f"{fixed_tests.resolve()}:/checks:ro", image,
                "python", "/checks/check_skill.py", "/skill"]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=900)
         return {"passed": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr}
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"passed": False, "error": str(exc)}

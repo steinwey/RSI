@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv-py314/Scripts/python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/vendor/harbor/src",
+        "${workspaceFolder}/vendor/reasoning-bank/third_party/src",
+        "${workspaceFolder}/vendor/SWE-bench",
+        "${workspaceFolder}/.venv-py314/Lib/site-packages"
+    ]
+}

@@ -87,7 +87,7 @@ Python / Go 里程碑转换为固定版本 SWE-bench harness 支持的本地评�
 
 `metrics.json` 和启用后的 W&B 记录 `step_accuracy`、`chain_accuracy`、`completed_chains`、`scored_chains`、`resolved_chains`、`chain_scoring_coverage`。整链只有完整执行且每步均解决才记为解决；未知评分或缺步不会计作整链成功。`chain_accuracy` 的分母为已进入运行的链数，运行中的曲线随新链加入而变化；最终完整运行覆盖所有选中的链。另提供仅针对完整已评分链的 `chain_scored_accuracy`。
 
-本次适配保留现有的轨迹截断、技能更新提示词、`skill_called` 统计逻辑和无修改分支日志。因此换用 EvoArena 不会自动消除此前发现的证据压缩及更新建议偏保守问题；`evolve: true` 仍控制技能演化，与数据集本身的仓库版本演化分别记录。
+本次适配使用同一套 `step_limit`，并保留技能更新提示词、`skill_called` 统计逻辑和无修改分支日志。换用 EvoArena 不会改变更新建议的保守程度；`evolve: true` 仍控制技能演化，与数据集本身的仓库版本演化分别记录。
 
 ## Terminal-Bench 2.0
 
@@ -104,11 +104,38 @@ python -m rsi.cli run --tasks tasks/terminal.json --validation tasks/terminal-va
 
 ## 技能更新闭环
 
-同一道题的五路使用相同经验与技能快照。更新器对比所有轨迹，输出通用记忆和可选文件修改，仅允许修改 `SKILL.md` 与 `scripts/inspect_project.py`。没有有效建议时保持不变。
+同一道题的五路使用相同经验与技能快照。技能和经验分开放在求解提示中：经验仍按上游方式附在末尾，技能以“工具箱”段落写入系统提示，列出 `/opt/rsi-skills/scripts/` 下所有脚本及 `SKILL.md` 全文（作为模板变量传入，`SKILL.md` 中的 `{{ }}` 不会被 Jinja 解析）。
 
-候选脚本在无网络、只读挂载的独立容器内运行固定功能检查。通过后，对独立验证任务分别运行旧版和新版（每题各五路、相同经验），成功率不下降且成功率或 token 成本改善才接受。无验证集、评分异常或测试失败均不启用候选版本。验证任务不写入经验库。
+更新器对比所有轨迹，输出通用记忆和可选技能修改。它收到当前技能的全部可改文件（`SKILL.md` 与 `scripts/*.py`，不含固定检查）以及 `skill_usage`：每路在哪些消息调用了哪些脚本、返回码是多少。`changes` 以路径映射完整新内容，值为 `null` 表示删除脚本，未列出的文件不变。规则：
+
+- 只能改 `SKILL.md` 和 `scripts/<字母开头的名字>.py`，可以新增、重写或删除脚本；`SKILL.md` 与 `scripts/inspect_project.py` 不能删除；最多 8 个脚本，单文件不超过 60000 字符，必须能编译。
+- 脚本定位为只读工具：可检查项目、定位相关测试、运行已有测试，不得修改仓库、安装依赖或联网。
+- `SKILL.md` 必须写出每个脚本名。没有有效建议时返回空 `changes`，`update.json` 会区分 “fixed-skill mode” 与 “updater proposed no skill changes”，后者附更新器给出的理由。
+
+候选技能在无网络、只读挂载的独立容器内运行固定功能检查：`inspect_project.py` 的 8 个框架识别用例；每个脚本 `--help` 正常退出，在空项目、Python 项目、Node 项目三个样例上以 `--path` 运行时不崩溃（退出码 0/1/2、无 traceback，退出 0 时输出 JSON）、20 秒内结束且不改动样例文件。只读性只在这些样例上检查，真实任务容器内并不强制，最终仍由验证对比把关。通过后，对独立验证任务分别运行旧版和新版（每题各五路、相同经验），成功率不下降且成功率或 token 成本改善才接受。无验证集、评分异常或测试失败均不启用候选版本。验证任务不写入经验库。
 
 说明更新和代码更新都是本项目扩展，不代表两篇论文已经实现可执行技能自我修改。记忆默认采用轻量词项检索，便于仅凭 DeepSeek API 跑通；它与论文的语义检索不同。若要贴近论文检索设置，在配置中指定 LiteLLM 支持的 `embedding_model` 及相应环境变量。
+
+## 轨迹证据与截断
+
+方案见 [docs/evidence-plan.md](docs/evidence-plan.md)。选择器和更新器按行动及其反馈的时间顺序接收原文；首次行动前的相同提示词、题目和技能上下文只提供一次。没有调用额外模型改写轨迹。
+
+轨迹只受 `step_limit` 限制，默认 30 步。一步是一次 assistant 行动加上它之后、下一次行动之前的观察。进入这两处模型的步骤和最终补丁不再按字数截断。超过 30 步时保留最近 30 步，更早的步数记在 `steps_omitted`。`spans` 为 `[起点, 终点, 原文]`，使用 Python 字符偏移，终点不包含在内；保留内容的 `omitted` 为 0。artifact 区间还需加所在单元的 `offset`。
+
+每题目录新增以下记录（验证题位于相应 baseline/candidate 子目录）：
+
+- `evidence/selector.json`、`evidence/updater.json`：调用前保存的完整 system/user 请求；调用失败也保留。
+- `evidence/manifest.json`：算法版本、预算、覆盖量、来源和 SHA256；请求与来源对象的哈希基于 `json.dumps(value, ensure_ascii=False)` 的 UTF-8 编码。
+- `evidence/sources/rollout-N.json`：仅含求解阶段允许字段的原始快照，不含官方评分。
+- `rollout-N/commands/index.jsonl`、逐命令 JSON 及输出文件：在上游模板截断之前保存环境返回的输出、返回码或异常、关联的 assistant 消息编号。字节输出用 `.bin` 原样保存。
+
+超过 30 步的更早行动不会进入选择器和更新器。命令原始输出仍完整保存在主机供实验后查阅，这两处模型不能按路径自动读取它。求解模型单次回复的 `max_tokens` 不变。旧日志在上游已丢弃的输出无法恢复。
+
+可离线重放步数限制，不调用模型、不改写原实验；输出目录必须是新的目录：
+
+```bash
+python scripts/replay_evidence.py runs/OLD_RUN runs/evidence-replay --step-limit 30
+```
 
 ## 输出与检查
 

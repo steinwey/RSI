@@ -43,7 +43,7 @@ def load_config(path):
     config["swe_dataset"] = evaluation_dataset_name(config["swe_dataset"])
     if config["rollouts"] != 5:
         raise ValueError("This experiment requires exactly five rollouts per task")
-    for key in ("step_limit", "command_timeout", "image_pull_timeout", "rollout_timeout", "evaluation_timeout", "evidence_chars"):
+    for key in ("step_limit", "command_timeout", "image_pull_timeout", "rollout_timeout", "evaluation_timeout"):
         if config[key] <= 0:
             raise ValueError(f"{key} must be positive")
     for cfg in (config["model"], config["judge_model"], config.get("wandb") or {}):
