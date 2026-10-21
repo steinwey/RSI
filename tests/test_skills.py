@@ -80,7 +80,7 @@ class SkillUpdateTests(unittest.TestCase):
         candidate, _ = self.store.propose({"SKILL.md": "Literal {{ not_a_variable }} guide with inspect_project.py"})
         text = skill_prompt(candidate)
         self.assertIn("python /opt/rsi-skills/scripts/inspect_project.py --path <repository>", text)
-        self.assertIn("not memory items", text)
+        self.assertIn("Use these tools when the guide below says they apply", text)
         from jinja2 import Template
         self.assertIn("{{ not_a_variable }}", Template("{{ rsi_skill }}").render(rsi_skill=text))
 
@@ -108,6 +108,8 @@ class SkillUpdateTests(unittest.TestCase):
         self.assertEqual(seen["data"]["skill_usage"][0]["calls"][0]["returncode"], 0)
         self.assertIn("add new scripts", seen["instruction"])
         self.assertIn("null to delete", seen["instruction"])
+        self.assertIn("Put a repeated procedure into SKILL.md", seen["instruction"])
+        self.assertNotIn("memory_items", seen["instruction"])
         self.assertNotIn("websites", seen["instruction"])
 
 

@@ -9,7 +9,6 @@ import yaml
 from . import ROOT, UPSTREAM
 from .backends import install_skill, make_backend
 from .common import safe_id, write_json
-from .memory import MemoryBank
 from .model import Model
 from .command_logs import RecordingEnvironment
 from .evidence import public_rollout, build_evidence, archive_request
@@ -43,8 +42,8 @@ def skill_prompt(skill):
     scripts = sorted(p for p in skill_files(skill) if p.startswith("scripts/"))
     tools = "\n".join(f"- python {SKILL_ROOT}/{p} --path <repository>  (see --help)" for p in scripts)
     return (f"## Skill toolkit (installed at {SKILL_ROOT})\n"
-            "These are tools, not memory items. Use them when the guide below says they apply; "
-            "they are checked to inspect the repository and run tests without changing your files.\n"
+            "Use these tools when the guide below says they apply. "
+            "They inspect the repository and run tests without changing your files.\n"
             f"Available scripts:\n{tools}\n\n" + (skill / "SKILL.md").read_text(encoding="utf-8").strip())
 
 
@@ -97,8 +96,7 @@ def execute_one(task, index, folder, skill, memory, config, backend_factory=make
                 return super().step()
         env = RecordingEnvironment(backend.env, folder, lambda: len(solver.messages)-1)
         agent = solver = TimedAgent(model, env, **settings)
-        result["status"], result["submission"] = agent.run(
-            task["prompt"], selected_memory=json.dumps(memory, ensure_ascii=False), rsi_skill=skill_prompt(skill))
+        result["status"], result["submission"] = agent.run(task["prompt"], rsi_skill=skill_prompt(skill))
         result["artifact"] = backend.artifact()
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
@@ -127,7 +125,7 @@ def run_group(task, folder, skill, memory, config, *, backend_factory=make_backe
     start = time.monotonic()
     pairs = []
     label = group_label(task, folder)
-    progress(f"  {label}: starting {config['rollouts']} rollouts, skill {skill.name}, {len(memory)} memory items")
+    progress(f"  {label}: starting {config['rollouts']} rollouts, skill {skill.name}")
     try:
         with ThreadPoolExecutor(max_workers=config["rollouts"]) as pool:
             futures = [pool.submit(execute_one, task, i, folder / f"rollout-{i}", skill, memory,
@@ -200,15 +198,21 @@ def induce(task, results, skill, config, model_factory=Model, *, folder=None):
     prompt = prompt.split("## Output Format")[0].replace("web navigation", "software and terminal tasks")
     prompt = prompt.replace("specific websites, queries, or string contents",
                             "specific repositories, task identifiers, or answer strings")
+    prompt = prompt.replace("as memory items", "as revisions to the installed skill")
+    prompt = prompt.replace("You can extract *at most 5* memory items from all trajectories combined.",
+                            "There is no memory bank. Reusable procedures and tools belong in the skill.")
+    prompt = prompt.replace("Make sure each memory item captures **actionable** and **transferable** insights.",
+                            "Make sure each skill revision captures an actionable, transferable procedure.")
     prompt += (
         '\n## Skill update\n'
-        f'The skill is a separate, versioned toolkit installed at {SKILL_ROOT}: SKILL.md says when and how to use '
-        'each tool, and scripts/*.py are Python tools the solver runs. current_skill holds the full current files. '
-        'skill_usage lists, per rollout, which scripts were called and the visible return code; the message number '
-        'points into that trajectory.\n'
-        'Memory items hold behavioral lessons. Change the skill only when a reusable tool or instruction would have '
-        'saved steps or prevented an error seen in these trajectories, for example locating the tests related to a '
-        'source file, finding the project-specific way to run a targeted test, or summarizing a failing test run. '
+        f'The only place a later task can learn from this comparison is the skill installed at {SKILL_ROOT}. '
+        'SKILL.md states the reusable procedure: when to reproduce, how to locate the code and tests named by a '
+        'milestone, and how to read a failing run. scripts/*.py are Python tools the solver runs. '
+        'current_skill holds the full current files. skill_usage lists, per rollout, which scripts were called and '
+        'the visible return code; the message number points into that trajectory.\n'
+        'Put a repeated procedure into SKILL.md even when it does not need a new script. Add or revise a script '
+        'when an operation would have saved steps, for example locating the tests related to a source file, finding '
+        'the project-specific way to run a targeted test, or summarizing a failing test run. '
         'You may edit SKILL.md, rewrite scripts, add new scripts, or delete scripts you added.\n'
         'changes maps a path to its complete new file contents, or to null to delete that script. Allowed paths: '
         'SKILL.md and scripts/<name>.py (a letter followed by letters, digits or underscores). Omitted files stay '
@@ -220,22 +224,20 @@ def induce(task, results, skill, config, model_factory=Model, *, folder=None):
         'or use the network. Running existing tests is allowed. SKILL.md must name every script and say when to use '
         'it. Do not put task-specific answers, patches, paths or identifiers into the skill.\n'
         'A proposal takes effect only after fixed automatic checks and a validation comparison against the current '
-        'skill. Return "changes": {} when the evidence does not support a reusable tool or instruction change, and '
-        'say why in reason.\n'
-        'Return {"memory_items": [{"title": str, "description": str, "content": str}], '
-        '"changes": {"<path>": "complete new contents or null"}, "reason": str, "evidence_rollouts": [int]}. '
-        'At most five memory items. Distinguish self-assessed success from verified success. '
-        'You have no hidden test feedback. ' + judge_step_limit_note(config["step_limit"]))
+        'skill. Return "changes": {} when the current skill already states the lesson or the evidence is specific '
+        'to this task, and say why in reason.\n'
+        'Return {"changes": {"<path>": "complete new contents or null"}, "reason": str, "evidence_rollouts": [int]}. '
+        'Distinguish self-assessed success from verified success. You have no hidden test feedback. '
+        + judge_step_limit_note(config["step_limit"]))
     model = model_factory(config["judge_model"])
     data = {"task": task["prompt"], **build_evidence(results, config["step_limit"], "updater"),
         "skill_usage": skill_usage(results), "current_skill": skill_files(skill)}
     if folder is not None:
         archive_request(folder, "updater", prompt, data, results, config["step_limit"])
     proposal = model.object(prompt, data)
-    items = proposal.get("memory_items", [])
-    if not isinstance(items, list) or len(items) > 5 or any(not isinstance(x, dict) or
-            any(not isinstance(x.get(k), str) for k in ("title", "description", "content")) for x in items):
-        raise ValueError("Invalid memory items")
+    proposal.pop("memory_items", None)
+    if not isinstance(proposal.get("changes", {}), dict):
+        raise ValueError("Invalid skill changes")
     proposal["usage"] = model.stats()
     return proposal
 
@@ -281,13 +283,11 @@ def _run_experiment(tasks, validation, config, output):
             task_dir = output / safe_id(task["id"])
             scope = output / "chains" / safe_id(task["chain"]["id"]) if task.get("chain") else output
             if scope not in contexts:
-                contexts[scope] = (SkillStore(scope / "skills", ROOT / "skills/test-and-diagnose"),
-                                   MemoryBank(scope / "memory.json", config.get("embedding_model")))
-            store, bank = contexts[scope]
+                contexts[scope] = SkillStore(scope / "skills", ROOT / "skills/test-and-diagnose")
+            store = contexts[scope]
             skill = store.current()
-            memory = bank.retrieve(task["prompt"])
-            write_json(output / "retrieval" / f'{safe_id(task["id"])}.json', memory)
-            report, results = run_group(task, task_dir, skill, memory, config)
+            write_json(output / "retrieval" / f'{safe_id(task["id"])}.json', [])
+            report, results = run_group(task, task_dir, skill, [], config)
             summaries.append(report)
             candidate = None
             proposal = None
@@ -296,18 +296,15 @@ def _run_experiment(tasks, validation, config, output):
                 progress("  updater: comparing trajectories")
                 proposal = induce(task, results, skill, config, folder=task_dir)
                 write_json(task_dir / "proposal.json", proposal)
-                items = proposal.get("memory_items", [])
-                bank.add(task["id"], task["prompt"], items)
                 changes = proposal.get("changes") or {}
-                progress(f"  updater: {len(items)} memory items, skill changes: "
+                progress("  updater: skill changes: "
                          + (", ".join(f"{p} ({'delete' if v is None else 'write'})" for p, v in changes.items())
                             if isinstance(changes, dict) and changes else "none"))
                 if not config["evolve"]:
-                    update = {"accepted": False, "memory_items": len(items), "reason": "fixed-skill mode"}
+                    update = {"accepted": False, "reason": "fixed-skill mode"}
                     continue
                 if not proposal.get("changes"):
-                    update = {"accepted": False, "memory_items": len(items),
-                              "reason": "updater proposed no skill changes",
+                    update = {"accepted": False, "reason": "updater proposed no skill changes",
                               "updater_reason": proposal.get("reason")}
                     continue
                 candidate, diff = store.propose(proposal["changes"])
@@ -323,10 +320,9 @@ def _run_experiment(tasks, validation, config, output):
                     progress(f"  skill {candidate.name}: validating on {len(validation)} tasks, baseline vs candidate")
                     baseline, changed = [], []
                     for vtask in validation:
-                        # Identical frozen experience for both arms; validation never writes memory.
-                        vmemory = [] if vtask.get("chain") else bank.retrieve(vtask["prompt"])
-                        base, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "baseline", skill, vmemory, config)
-                        new, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "candidate", candidate, vmemory, config)
+                        # Both arms see the same skill-only prompt; validation does not change the skill.
+                        base, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "baseline", skill, [], config)
+                        new, _ = run_group(vtask, task_dir / "validation" / safe_id(vtask["id"]) / "candidate", candidate, [], config)
                         baseline.append(base)
                         changed.append(new)
                     accepted = accept_metrics(baseline, changed)
@@ -338,7 +334,7 @@ def _run_experiment(tasks, validation, config, output):
                 else:
                     evidence["validation_skipped"] = "gate failed, no validation tasks, or unchanged candidate"
                 store.record(candidate, accepted, evidence)
-                update = {"accepted": accepted, "memory_items": len(items), **evidence}
+                update = {"accepted": accepted, **evidence}
                 progress(f"  skill {candidate.name}: {'ACCEPTED' if accepted else 'rejected'}")
             except Exception as exc:
                 if candidate is not None:
@@ -354,7 +350,7 @@ def _run_experiment(tasks, validation, config, output):
                 update_run(output, completed_tasks=len(summaries), current_skill_version=store.current().name)
                 if task.get("chain"):
                     update_run(output, current_chain=task["chain"]["id"],
-                               chain_skill_versions={path.name: context[0].current().name for path, context in contexts.items()})
+                               chain_skill_versions={path.name: context.current().name for path, context in contexts.items()})
                 tracker.log_task(task, report, update)
         tracker.log_summary(summaries)
         return summaries

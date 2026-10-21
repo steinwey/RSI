@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rsi import ROOT
-from rsi.backends import SWEBackend, harness_command
+from rsi.backends import SWEBackend, harness_command, isolate_eval_network
 from rsi.cli import load_config, main
 from rsi.common import write_json
 from rsi.swe import evaluation_dataset_name, validate_swe_tasks
@@ -76,6 +76,7 @@ class SWEScoringTests(unittest.TestCase):
             backend = SWEBackend(task, self.root, config)
         self.assertEqual(environment.call_args.kwargs["pull_timeout"], 10800)
         self.assertEqual(environment.call_args.kwargs["timeout"], config["command_timeout"])
+        self.assertEqual(environment.call_args.kwargs["run_args"], ["--rm", "--network", "none"])
         self.assertEqual(backend.base, "abc")
 
     def test_incompatible_dataset_stops_cli_before_solver_work(self):
@@ -109,6 +110,23 @@ class SWEScoringTests(unittest.TestCase):
         with patch("rsi.swe.load_evaluation_rows") as load:
             validate_swe_tasks([{"benchmark": "terminal"}], self.config)
         load.assert_not_called()
+
+    def test_eval_container_cannot_use_a_requested_network(self):
+        import docker.models.containers as containers
+        seen = {}
+        original = containers.ContainerCollection.create
+
+        def create(self, image, command=None, **kwargs):
+            seen["kwargs"] = kwargs
+            return "container"
+
+        containers.ContainerCollection.create = create
+        try:
+            isolate_eval_network()
+            containers.ContainerCollection.create(None, "image:latest", network_mode="bridge")
+        finally:
+            containers.ContainerCollection.create = original
+        self.assertEqual(seen["kwargs"]["network_mode"], "none")
 
     def test_missing_report_cannot_reuse_an_old_success(self):
         self.report("old-run")

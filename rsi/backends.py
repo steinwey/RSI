@@ -49,8 +49,22 @@ _POSIX_TEXT = (
     "    return _read(self,encoding='utf-8' if encoding is None else encoding,errors=errors)\n"
     "pathlib.Path.read_text=read_text\n"
     "sys.argv=['swebench.harness.run_evaluation',*sys.argv[1:]]\n"
+    "from rsi.backends import isolate_eval_network\n"
+    "isolate_eval_network()\n"
     "runpy.run_module('swebench.harness.run_evaluation', run_name='__main__')\n"
 )
+
+
+def isolate_eval_network():
+    """Keep the grading container off the network so a patch cannot fetch hidden commits."""
+    import docker.models.containers as containers
+    create = containers.ContainerCollection.create
+
+    def create_offline(self, image, command=None, **kwargs):
+        kwargs["network_mode"] = "none"
+        return create(self, image, command, **kwargs)
+
+    containers.ContainerCollection.create = create_offline
 
 
 def harness_command(config, predictions, instance_id, run_id):
@@ -71,8 +85,10 @@ class SWEBackend:
         iid = instance["instance_id"].replace("__", "_1776_")
         # Image convention from ReasoningBank's get_swebench_docker_image_name.
         image = instance.get("image_name") or instance.get("image") or f"swebench/sweb.eval.x86_64.{iid}:latest".lower()
+        # The model is called on the host. The container only needs the local repository and its installed tools.
         self.env = CompatibleDockerEnvironment(image=image, cwd="/testbed", timeout=config["command_timeout"],
-                                     container_timeout="4h", pull_timeout=config.get("image_pull_timeout", 7200))
+                                     container_timeout="4h", pull_timeout=config.get("image_pull_timeout", 7200),
+                                     run_args=["--rm", "--network", "none"])
         self.base = self.env.execute("git rev-parse HEAD")["output"].strip()
 
     def artifact(self):

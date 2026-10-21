@@ -13,8 +13,8 @@ from rsi import ROOT
 from rsi.cli import load_config, load_tasks, main
 from rsi.backends import SWEChainBackend
 from rsi.common import read_json, write_json
-from rsi.evo_swe import (_download_image, evaluation_rows, hub_endpoint, prepare_tasks,
-                         prepare_images, validate_order, validate_tasks, verify_references)
+from rsi.evo_swe import (_download_image, evaluation_rows, hub_endpoint, isolate_repository_script,
+                         prepare_tasks, prepare_images, validate_order, validate_tasks, verify_references)
 from rsi.runner import run_experiment
 from rsi.tracking import chain_metrics
 
@@ -140,10 +140,7 @@ class EvoSWETests(unittest.TestCase):
         main_calls = [call for call in calls if call[1].parent == output]
         self.assertNotEqual(main_calls[0][2], main_calls[1][2])
         self.assertEqual(main_calls[0][2], main_calls[2][2])
-        self.assertEqual(main_calls[2][3], [])
-        self.assertEqual(main_calls[1][3][0]["task_id"], main[0]["id"])
-        self.assertEqual(main_calls[3][3][0]["task_id"], main[2]["id"])
-        self.assertTrue(all(call[3] == [] for call in calls if call[1].parent != output))
+        self.assertTrue(all(call[3] == [] for call in calls))
         self.assertEqual(read_json(output / "metrics.json")["resolved_chains"], 2)
         self.assertTrue((output / "chains/repo-chain-a/skills/history.jsonl").exists())
         self.assertFalse((output / "chains/repo-chain-b/skills/history.jsonl").exists())
@@ -167,11 +164,45 @@ class EvoSWETests(unittest.TestCase):
         tasks = self.prepare([self.chain()])
         bases = {t["instance"]["image"]: t["instance"]["base_commit"] for t in tasks}
         def execute(command, **kwargs):
-            return subprocess.CompletedProcess(command, 0, bases[command[5]] if command[1] == "run" else "")
+            stdout = ""
+            if command[1] == "run" and "rev-list" in command:
+                stdout = "0\n"
+            elif command[1] == "run":
+                stdout = bases[command[5]] + "\n"
+            return subprocess.CompletedProcess(command, 0, stdout)
         with patch("rsi.evo_swe.subprocess.run", side_effect=execute), \
              patch("rsi.evo_swe.urllib.request.urlopen") as request:
             prepare_images(tasks, self.root / "images")
         request.assert_not_called()
+
+    def test_future_commits_are_removed_before_an_image_is_reused(self):
+        tasks = self.prepare([self.chain()])
+        bases = {t["instance"]["image"]: t["instance"]["base_commit"] for t in tasks}
+        base = tasks[0]["instance"]["base_commit"]
+        script = isolate_repository_script(base)
+        self.assertIn(f"git reset --hard {base}", script)
+        self.assertIn("git remote remove", script)
+        self.assertIn("git reflog expire --expire=now --all", script)
+        self.assertIn("git gc --prune=now", script)
+        self.assertIn('git rev-list --all --not HEAD --count', script)
+        self.assertIn('git merge-base --is-ancestor', script)
+        leaked = set()
+        def execute(command, **kwargs):
+            stdout = ""
+            if command[1] == "run" and "rev-list" in command:
+                image = command[5]
+                stdout = "0\n" if image in leaked else "4\n"
+                leaked.add(image)
+            elif command[1] == "run":
+                stdout = bases[command[5]] + "\n"
+            return subprocess.CompletedProcess(command, 0, stdout)
+        with patch("rsi.evo_swe.subprocess.run", side_effect=execute) as run, \
+             patch("rsi.evo_swe.urllib.request.urlopen") as request:
+            prepare_images(tasks, self.root / "images")
+        request.assert_not_called()
+        self.assertTrue(any(call.args[0][1] == "build" for call in run.call_args_list))
+        written = (self.root / "images" / "build" / tasks[0]["id"] / "isolate-history.sh").read_text(encoding="utf-8")
+        self.assertEqual(written, script)
 
     def test_backend_checks_the_base_snapshot_and_uses_the_private_dataset(self):
         task = self.prepare([self.chain()])[0]
@@ -180,6 +211,7 @@ class EvoSWETests(unittest.TestCase):
             environment.return_value.execute.return_value = {"output": base + "\n"}
             backend = SWEChainBackend(task, self.root, self.config)
             self.assertEqual(backend.config["swe_dataset"], task["evaluation_dataset"])
+            self.assertEqual(environment.call_args.kwargs["run_args"], ["--rm", "--network", "none"])
             environment.return_value.execute.return_value = {"output": "different snapshot\n"}
             with patch.object(SWEChainBackend, "close") as close:
                 with self.assertRaisesRegex(RuntimeError, "image base differs"):

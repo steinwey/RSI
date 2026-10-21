@@ -52,4 +52,14 @@ class Model:
                 "cost_usd": self.cost if self.cost_known else None}
 
     def object(self, instruction, data):
-        return parse_object(self.query(object_messages(instruction, data))["content"])
+        messages = object_messages(instruction, data)
+        error = None
+        for attempt in range(3):
+            content = self.query(messages)["content"]
+            try:
+                return parse_object(content)
+            except (json.JSONDecodeError, ValueError) as exc:
+                error = exc
+                if attempt < 2:
+                    print(f"[judge] invalid JSON on attempt {attempt + 1}, retrying", flush=True)
+        raise ValueError(f"Judge returned invalid JSON after 3 attempts: {error}") from error

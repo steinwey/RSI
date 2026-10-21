@@ -94,6 +94,17 @@ class EvidenceTests(unittest.TestCase):
             self.assertNotIn("SECRET_VERIFIER", serialized(snapshot))
             self.assertEqual(manifest["sources"][0]["message_sha256"], [sha("act")])
 
+    def test_judge_retries_until_the_response_is_json(self):
+        model = Model({"name": "mock"})
+        replies = iter([{"content": '{"rollout": 1, "reason": "unterminated'}, {"content": "not-json"},
+                         {"content": '{"rollout": 2, "reason": "visible tests"}'}])
+        with patch.object(model, "query", side_effect=lambda messages: next(replies)) as query:
+            self.assertEqual(model.object("choose", {"task": "fix"}), {"rollout": 2, "reason": "visible tests"})
+        self.assertEqual(query.call_count, 3)
+        with patch.object(model, "query", return_value={"content": "still bad"}):
+            with self.assertRaisesRegex(ValueError, "invalid JSON after 3 attempts"):
+                model.object("choose", {"task": "fix"})
+
     def test_updater_archive_exists_before_failed_provider_call(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

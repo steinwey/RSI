@@ -264,6 +264,46 @@ def _download_image(path, metadata, timeout):
                 raise
 
 
+def isolate_repository_script(base):
+    """Drop commits that are not ancestors of the milestone, matching SWE-bench's future-history removal.
+
+    The published archives keep later tags and branches. Resetting HEAD leaves those objects reachable.
+    Grading only checks out this base commit and applies its hidden test patch, so those objects can go.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", base):
+        raise ValueError("Invalid base commit")
+    return "\n".join([
+        "#!/bin/bash",
+        "set -euo pipefail",
+        "cd /testbed",
+        "git config --global --add safe.directory /testbed",
+        f"git reset --hard {base}",
+        "git clean -fd",
+        "while read -r remote; do",
+        '  [ -n "$remote" ] && git remote remove "$remote"',
+        "done < <(git remote)",
+        "head_ref=$(git symbolic-ref -q HEAD || true)",
+        "while read -r ref; do",
+        '  [ -n "$ref" ] || continue',
+        '  if [ "$ref" = "$head_ref" ]; then continue; fi',
+        '  if git rev-parse -q --verify "${ref}^{commit}" >/dev/null && git merge-base --is-ancestor "${ref}^{commit}" HEAD; then',
+        "    continue",
+        "  fi",
+        '  git update-ref -d "$ref"',
+        "done < <(git for-each-ref --format='%(refname)')",
+        "git reflog expire --expire=now --all",
+        "git gc --prune=now",
+        "count=$(git rev-list --all --not HEAD --count)",
+        '[ "$count" -eq 0 ]',
+        "",
+    ])
+
+
+def _git_in_image(image, *args, timeout=60):
+    return subprocess.run(["docker", "run", "--rm", "--entrypoint", "git", image, *args],
+                          capture_output=True, text=True, timeout=timeout)
+
+
 def prepare_images(tasks, cache, timeout=7200):
     cache = Path(cache).resolve()
     rows = evaluation_rows(tasks)
@@ -275,9 +315,10 @@ def prepare_images(tasks, cache, timeout=7200):
             continue
         prepared.add(image)
         if subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=30).returncode == 0:
-            check = subprocess.run(["docker", "run", "--rm", "--entrypoint", "git", image, "rev-parse", "HEAD"],
-                                   capture_output=True, text=True, timeout=60)
-            if check.returncode == 0 and check.stdout.strip() == row["base_commit"]:
+            check = _git_in_image(image, "rev-parse", "HEAD")
+            future = _git_in_image(image, "rev-list", "--all", "--not", "HEAD", "--count")
+            if (check.returncode == 0 and check.stdout.strip() == row["base_commit"]
+                    and future.returncode == 0 and future.stdout.strip() == "0"):
                 print(f"Image cached: {image}", flush=True)
                 continue
         source = row["source_image"]
@@ -295,16 +336,20 @@ def prepare_images(tasks, cache, timeout=7200):
             subprocess.run(["docker", "load", "--input", str(archive)], check=True, timeout=timeout)
         directory = cache / "build" / row["instance_id"]
         directory.mkdir(parents=True, exist_ok=True)
+        (directory / "isolate-history.sh").write_text(isolate_repository_script(row["base_commit"]),
+                                                      encoding="utf-8", newline="\n")
         (directory / "Dockerfile").write_text(
-            f"FROM {source}\nUSER root\nWORKDIR /testbed\nRUN git config --global --add safe.directory /testbed "
-            f"&& git reset --hard {row['base_commit']} && git clean -fd\n",
+            f"FROM {source}\nUSER root\nWORKDIR /testbed\nCOPY isolate-history.sh /tmp/isolate-history.sh\n"
+            "RUN bash /tmp/isolate-history.sh && rm /tmp/isolate-history.sh\n",
             encoding="utf-8", newline="\n")
         subprocess.run(["docker", "build", "--network=none", "--pull=false", "--tag", image, str(directory)],
                        check=True, timeout=timeout)
-        actual = subprocess.run(["docker", "run", "--rm", "--entrypoint", "git", image, "rev-parse", "HEAD"],
-                                capture_output=True, text=True, check=True, timeout=60).stdout.strip()
-        if actual != row["base_commit"]:
+        actual = _git_in_image(image, "rev-parse", "HEAD", timeout=60)
+        future = _git_in_image(image, "rev-list", "--all", "--not", "HEAD", "--count", timeout=60)
+        if actual.returncode != 0 or actual.stdout.strip() != row["base_commit"]:
             raise RuntimeError("Prepared image does not contain the expected oracle base snapshot")
+        if future.returncode != 0 or future.stdout.strip() != "0":
+            raise RuntimeError("Prepared image still contains commits after the milestone base")
         print(f"Image ready: {image}", flush=True)
 
 

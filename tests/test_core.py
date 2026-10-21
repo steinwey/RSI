@@ -184,8 +184,8 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(calls[0][1], calls[3][1])
         self.assertEqual(calls[2][1], calls[3][1])
         self.assertEqual(calls[1][2], calls[2][2])
-        bank = json.loads((output / "memory.json").read_text())
-        self.assertEqual([item["task_id"] for item in bank], ["example-1"])
+        self.assertTrue(all(memory == [] for _, _, memory in calls))
+        self.assertFalse((output / "memory.json").exists())
         totals = json.loads((output / "metrics.json").read_text())
         self.assertEqual((totals["input_tokens"], totals["output_tokens"], totals["tokens"]), (32, 8, 40))
 
