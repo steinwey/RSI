@@ -18,6 +18,8 @@ judge_model:
   timeout: 180
   num_retries: 2
 rollouts: 5
+# Optional task-local planning; uses judge_model unless planner_model is supplied.
+planner_enabled: false
 step_limit: 30
 cost_limit: 3.0
 command_timeout: 60

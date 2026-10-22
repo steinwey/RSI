@@ -113,6 +113,21 @@ class CoreTests(unittest.TestCase):
             self.group()
         self.assertTrue(all(x.closed for x in FakeBackend.instances))
         self.assertFalse(any(x.scored for x in FakeBackend.instances))
+    def test_planner_routes_are_isolated_and_cost_is_included(self):
+        plan = {"status": "planned", "strategies": [
+            {"rollout": i, "hypothesis": f"unique-hypothesis-{i}"} for i in range(1, 5)],
+            "usage": {"calls": 1, "input_tokens": 7, "output_tokens": 3}}
+        with patch("rsi.runner.make_plan", return_value=plan):
+            report, results = self.group()
+        self.assertEqual(report["tokens"], 100)
+        self.assertIsNone(results[0]["strategy"])
+        self.assertNotIn("Task-local exploration plan", results[0]["messages"][0]["content"])
+        for i in range(1, 5):
+            prompt = results[i]["messages"][0]["content"]
+            self.assertIn(f"unique-hypothesis-{i}", prompt)
+            for j in set(range(1, 5)) - {i}:
+                self.assertNotIn(f"unique-hypothesis-{j}", prompt)
+        self.assertEqual(results[0]["planner"], plan)
     def test_one_failed_rollout_preserves_others(self):
         FakeBackend.fail_index = 1
         report, results = self.group()

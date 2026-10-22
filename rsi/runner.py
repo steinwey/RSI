@@ -10,6 +10,7 @@ from . import ROOT, UPSTREAM
 from .backends import install_skill, make_backend
 from .common import safe_id, write_json
 from .model import Model
+from .planner import make_plan
 from .command_logs import RecordingEnvironment
 from .evidence import public_rollout, build_evidence, archive_request
 from .skills import SkillStore, accept_metrics, functional_gate, skill_files
@@ -69,7 +70,7 @@ def skill_usage(results):
 
 
 def execute_one(task, index, folder, skill, memory, config, backend_factory=make_backend,
-                model_factory=Model):
+                model_factory=Model, strategy=None):
     from minisweagent.agents.default import DefaultAgent, LimitsExceeded
     folder.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
@@ -96,7 +97,15 @@ def execute_one(task, index, folder, skill, memory, config, backend_factory=make
                 return super().step()
         env = RecordingEnvironment(backend.env, folder, lambda: len(solver.messages)-1)
         agent = solver = TimedAgent(model, env, **settings)
-        result["status"], result["submission"] = agent.run(task["prompt"], rsi_skill=skill_prompt(skill))
+        guide = skill_prompt(skill)
+        if strategy is not None:
+            guide += ("\n\n## Task-local exploration plan\n"
+                      "This is a hypothesis, not an answer. Complete the whole task, including implementation, "
+                      "verification and submission. Change direction when evidence contradicts the plan and "
+                      "explain why. The exploration budget is part of your total step limit.\n"
+                      + json.dumps(strategy, ensure_ascii=False))
+        result["strategy"] = strategy
+        result["status"], result["submission"] = agent.run(task["prompt"], rsi_skill=guide)
         result["artifact"] = backend.artifact()
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
@@ -123,13 +132,15 @@ def run_group(task, folder, skill, memory, config, *, backend_factory=make_backe
     """Five independent environments, then one selected result; always clean up all five."""
     folder.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
+    plan = make_plan(task, skill_prompt(skill), config, folder, model_factory)
+    strategies = {p["rollout"]: p for p in plan["strategies"]}
     pairs = []
     label = group_label(task, folder)
     progress(f"  {label}: starting {config['rollouts']} rollouts, skill {skill.name}")
     try:
         with ThreadPoolExecutor(max_workers=config["rollouts"]) as pool:
             futures = [pool.submit(execute_one, task, i, folder / f"rollout-{i}", skill, memory,
-                                   config, backend_factory, model_factory) for i in range(config["rollouts"])]
+                                   config, backend_factory, model_factory, strategies.get(i)) for i in range(config["rollouts"])]
             # Preserve completed handles even if an unexpected worker error occurs.
             failures = []
             for future in futures:
@@ -140,6 +151,8 @@ def run_group(task, folder, skill, memory, config, *, backend_factory=make_backe
             if failures:
                 raise RuntimeError(f"Unexpected worker failure: {failures[0]}")
         results = [r for r, _ in pairs]
+        for result in results:
+            result["planner"] = plan
         valid = [r for r in results if r["error"] is None]
         if not valid:
             write_json(folder / "group-error.json", {"error": "All rollouts failed", "rollouts": results})
@@ -172,12 +185,13 @@ def run_group(task, folder, skill, memory, config, *, backend_factory=make_backe
         progress(f"  {label}: {outcome}, {time.monotonic()-start:.0f}s"
                  + (f", error: {score['error'][:200]}" if score.get("error") else ""))
         selector_stats = selector.stats()
-        input_tokens = sum(r["usage"]["input_tokens"] for r in results) + selector_stats["input_tokens"]
-        output_tokens = sum(r["usage"]["output_tokens"] for r in results) + selector_stats["output_tokens"]
+        input_tokens = sum(r["usage"]["input_tokens"] for r in results) + selector_stats["input_tokens"] + plan["usage"].get("input_tokens", 0)
+        output_tokens = sum(r["usage"]["output_tokens"] for r in results) + selector_stats["output_tokens"] + plan["usage"].get("output_tokens", 0)
         report = {"task_id": task["id"], "selected": chosen, "success": score["success"],
                   "input_tokens": input_tokens, "output_tokens": output_tokens,
                   "tokens": input_tokens + output_tokens, "seconds": time.monotonic()-start,
-                  "skill_version": skill.name, "selector_usage": selector_stats}
+                  "skill_version": skill.name, "selector_usage": selector_stats,
+                  "planner_usage": plan["usage"], "planner_status": plan["status"]}
         if task.get("chain"):
             report["chain"] = task["chain"]
         write_json(folder / "summary.json", report)
@@ -210,6 +224,9 @@ def induce(task, results, skill, config, model_factory=Model, *, folder=None):
         'milestone, and how to read a failing run. scripts/*.py are Python tools the solver runs. '
         'current_skill holds the full current files. skill_usage lists, per rollout, which scripts were called and '
         'the visible return code; the message number points into that trajectory.\n'
+        'Planner plans are task-local hypotheses, not independent evidence of success. Compare plans with actual '
+        'execution and deviations. You may revise the reusable planning rules in SKILL.md; merge duplicates, '
+        'remove unsupported rules and keep the guide concise. Do not copy task-specific plans into the skill. '
         'Put a repeated procedure into SKILL.md even when it does not need a new script. Add or revise a script '
         'when an operation would have saved steps, for example locating the tests related to a source file, finding '
         'the project-specific way to run a targeted test, or summarizing a failing test run. '
@@ -231,7 +248,8 @@ def induce(task, results, skill, config, model_factory=Model, *, folder=None):
         + judge_step_limit_note(config["step_limit"]))
     model = model_factory(config["judge_model"])
     data = {"task": task["prompt"], **build_evidence(results, config["step_limit"], "updater"),
-        "skill_usage": skill_usage(results), "current_skill": skill_files(skill)}
+        "skill_usage": skill_usage(results), "current_skill": skill_files(skill),
+        "planner": results[0].get("planner") if results else None}
     if folder is not None:
         archive_request(folder, "updater", prompt, data, results, config["step_limit"])
     proposal = model.object(prompt, data)

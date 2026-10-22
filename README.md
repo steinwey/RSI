@@ -167,3 +167,23 @@ python scripts/check_upstreams.py
 ```
 
 离线测试使用真实上游 agent 循环与模拟模型/环境，检查同题并行、结果选择、隐藏评分隔离、技能版本切换及回滚。它们不代表两个 benchmark 已实际跑通；真实结果须以 Docker + API 执行产生的评分为准。
+
+
+### 可选 planner
+
+在运行所用 YAML 中设置 `planner_enabled: true`（默认 false）。默认复用 `judge_model`，
+也可提供同格式的 `planner_model`。每个求解组先进行一次逻辑规划请求；服务端重试仍由模型配置控制。
+planner 仅读取任务描述和当前技能，不访问仓库、隐藏评测或参考补丁。
+五路配置下 rollout-0 自由探索，其余四路获得各自的假设、首个实验、停止条件和探索预算。
+策略数量随 `rollouts` 调整；只有一路时不规划。每路仍需完成完整解答，可根据证据偏离计划。
+探索预算上限为总步数的三分之一，通过提示指导执行，不是额外的步数配额。
+
+固定规划协议在 `rsi/planner.py`；可演化的策略分配规则在 `skills/test-and-diagnose/SKILL.md`。
+updater 同时读取计划和执行轨迹，只将可复用规则归纳进 skill。验证原版和候选时各自重新规划。
+格式错误、重复的假设与实验组合或 API 错误会记录原因并退回独立求解；不做额外的语义去重模型调用。
+
+各组保存 `planner-request.json`、收到的原始 `planner-response.json` 和 `plan.json`；
+每条 trajectory 保存分配的 `strategy`，updater 请求保存完整计划。
+`summary.json` 的 `planner_usage` 单列用量，组的输入、输出和总 tokens 包含 planner，
+因此主任务指标和候选比较也计入规划 tokens。验证组仍在验证子目录单独统计，
+整轮 `metrics.json` 仍不是包含全部验证及 updater 的总账单。
