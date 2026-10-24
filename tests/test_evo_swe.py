@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import io
 import json
@@ -10,7 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rsi import ROOT
-from rsi.cli import load_config, load_tasks, main
+from rsi.config import load_config
+from rsi.tasks import load_tasks
+from rsi.cli import main
 from rsi.backends import SWEChainBackend
 from rsi.common import read_json, write_json
 from rsi.evo_swe import (_download_image, evaluation_rows, hub_endpoint, isolate_repository_script,
@@ -107,43 +108,74 @@ class EvoSWETests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "share milestones"):
             validate_order(main, heldout)
 
-    def test_partially_solved_or_ungraded_chains_do_not_count_as_resolved(self):
+    def test_chain_accuracy_counts_every_milestone(self):
         tasks = self.prepare([self.chain(), self.chain("repo-chain-b")])
         reports = [{"chain": t["chain"], "success": result}
                    for t, result in zip(tasks, [True, True, True, False])]
-        self.assertEqual(chain_metrics(reports)["chain_accuracy"], 0.5)
-        self.assertEqual(chain_metrics(reports)["step_accuracy"], 0.75)
+        metrics = chain_metrics(reports)
+        self.assertEqual(metrics["chain_accuracy"], 0.75)
+        self.assertEqual(metrics["resolved_chains"], 1)
+        self.assertEqual(metrics["chain_scored_accuracy"], 0.75)
+        self.assertEqual(metrics["step_accuracy"], 0.75)
         partial = chain_metrics(reports[:1])
         self.assertEqual(partial["completed_chains"], 0)
         self.assertEqual(partial["resolved_chains"], 0)
+        self.assertEqual(partial["chain_accuracy"], 0.5)
         reports[-1]["success"] = None
-        self.assertEqual(chain_metrics(reports)["scored_chains"], 1)
-        self.assertEqual(chain_metrics(reports)["chain_accuracy"], 0.5)
+        ungraded = chain_metrics(reports)
+        self.assertEqual(ungraded["scored_chains"], 1)
+        self.assertEqual(ungraded["chain_accuracy"], 0.75)
+        self.assertEqual(ungraded["chain_scored_accuracy"], 1)
+        broken = self.prepare([self.chain("repo-chain-c", count=4)], "broken.json")
+        broken_reports = [{"chain": t["chain"], "success": result}
+                          for t, result in zip(broken, [False, True, True, True])]
+        self.assertEqual(chain_metrics(broken_reports)["chain_accuracy"], 0.75)
+        broken_reports = [{"chain": t["chain"], "success": result}
+                          for t, result in zip(broken, [True, True, False, True])]
+        self.assertEqual(chain_metrics(list(reversed(broken_reports)))["chain_accuracy"], 0.75)
 
-    def test_memory_and_accepted_skill_versions_are_isolated_between_chains(self):
+    def test_accepted_skill_versions_continue_across_chains(self):
         main = self.prepare([self.chain(), self.chain("repo-chain-b")], "main.json")
-        heldout = self.prepare([self.chain("repo-chain-v")], "val.json")
         calls = []
-        def group(task, folder, skill, memory, config):
-            calls.append((task["id"], folder, skill.name, copy.deepcopy(memory)))
-            tokens = 10 if folder.name == "candidate" else 20
+        def group(task, folder, skill, config):
+            calls.append((task["id"], folder, skill.name))
+            tokens = 20
             return {"task_id": task["id"], "chain": task["chain"], "success": True,
                     "tokens": tokens, "input_tokens": tokens - 2, "output_tokens": 2,
                     "seconds": 1}, []
-        proposals = [{"changes": {"SKILL.md": "A general tested workflow"}, "memory_items": [{"content": "first"}]}]
-        proposals += [{"changes": {}, "memory_items": [{"content": "next"}]} for _ in range(3)]
+        proposals = [{"changes": {"SKILL.md": "A general tested workflow"}},
+                     {"changes": {"SKILL.md": "A revised workflow at the chain boundary"}},
+                     {"changes": {}}, {"changes": {}}]
         output = self.root / "run"
         with patch("rsi.runner.run_group", side_effect=group), \
              patch("rsi.runner.induce", side_effect=proposals), \
              patch("rsi.runner.functional_gate", return_value={"passed": True}):
-            run_experiment(main, heldout, self.config, output)
+            run_experiment(main, self.config, output)
         main_calls = [call for call in calls if call[1].parent == output]
         self.assertNotEqual(main_calls[0][2], main_calls[1][2])
-        self.assertEqual(main_calls[0][2], main_calls[2][2])
-        self.assertTrue(all(call[3] == [] for call in calls))
+        self.assertNotEqual(main_calls[1][2], main_calls[2][2])
+        self.assertEqual(main_calls[2][2], main_calls[3][2])
         self.assertEqual(read_json(output / "metrics.json")["resolved_chains"], 2)
-        self.assertTrue((output / "chains/repo-chain-a/skills/history.jsonl").exists())
-        self.assertFalse((output / "chains/repo-chain-b/skills/history.jsonl").exists())
+        history = [json.loads(line) for line in (output / "skills/history.jsonl").read_text().splitlines()]
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[1]["after"], main_calls[2][2])
+        self.assertEqual(read_json(output / "skills/current.json")["version"], main_calls[3][2])
+        self.assertFalse((output / "chains").exists())
+        info = read_json(output / "run-info.json")
+        self.assertEqual(info["skill_scope"], "run")
+        self.assertEqual(info["current_skill_version"], main_calls[3][2])
+        self.assertNotIn("chain_skill_versions", info)
+
+        # A fresh run must start at the seed, even after the previous run evolved.
+        fresh = self.root / "fresh-run"
+        with patch("rsi.runner.run_group", side_effect=group), \
+             patch("rsi.runner.induce") as updater, \
+             patch("rsi.runner.functional_gate", return_value={"passed": True}):
+            run_experiment(main, {**self.config, "evolve": False}, fresh)
+        updater.assert_not_called()
+        self.assertTrue(all(call[2] == main_calls[0][2] for call in calls if call[1].parent == fresh))
+        self.assertEqual(read_json(fresh / "skills/current.json")["version"], main_calls[0][2])
+        self.assertEqual(read_json(output / "skills/current.json")["version"], main_calls[3][2])
 
     def test_archive_download_resumes_and_checks_the_published_hash(self):
         content = b"previous bytes and remaining bytes"

@@ -69,7 +69,7 @@ def isolate_eval_network():
 
 def harness_command(config, predictions, instance_id, run_id):
     return [
-        sys.executable, "-c", _POSIX_TEXT,
+        sys.executable, "-X", "utf8", "-c", _POSIX_TEXT,
         "--dataset_name", evaluation_dataset_name(config["swe_dataset"]), "--split", config["swe_split"],
         "--predictions_path", str(Path(predictions).resolve()),
         "--instance_ids", instance_id, "--max_workers", "1", "--run_id", run_id,
@@ -109,8 +109,12 @@ class SWEBackend:
         run_id = "rsi-" + uuid.uuid4().hex[:12]
         result = subprocess.run(
             harness_command(self.config, self.folder / "predictions.json", self.task["id"], run_id),
-            cwd=self.folder, capture_output=True, text=True, timeout=self.config["evaluation_timeout"] + 900)
-        (self.folder / "evaluation.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+            cwd=self.folder, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=self.config["evaluation_timeout"] + 900)
+        # A Windows child can otherwise emit the local code page while the host
+        # expects UTF-8. Diagnostic bytes must never prevent reading the report.
+        (self.folder / "evaluation.log").write_text(
+            (result.stdout or "") + (result.stderr or ""), encoding="utf-8")
         # Read only this invocation: a retry must never reuse an older score.
         path = self.folder / "logs/evaluation" / run_id / "rsi" / self.task["id"] / "report.json"
         if path.exists():

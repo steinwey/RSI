@@ -1,0 +1,48 @@
+provider: opencode-zen
+allowed_models:
+- deepseek-v4.1-flash
+- glm-5.3-flash
+model:
+  name: deepseek-v4.1-flash
+  provider: opencode-zen
+  custom_llm_provider: openai
+  api_base: https://opencode.ai/inference/openai/v1
+  api_key_env: OPENCODE_API_KEY
+  reasoning_effort: none
+  extra_body:
+    thinking:
+      type: disabled
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 120
+  num_retries: 2
+judge_model:
+  name: deepseek-v4.1-flash
+  provider: opencode-zen
+  custom_llm_provider: openai
+  api_base: https://opencode.ai/inference/openai/v1
+  api_key_env: OPENCODE_API_KEY
+  reasoning_effort: none
+  extra_body:
+    thinking:
+      type: disabled
+  temperature: 0.0
+  max_tokens: 8192
+  timeout: 180
+  num_retries: 2
+rollouts: 5
+planner_enabled: false
+step_limit: 30
+cost_limit: 3.0
+command_timeout: 60
+image_pull_timeout: 7200
+rollout_timeout: 1800
+evaluation_timeout: 1800
+swe_dataset: SWE-bench/SWE-bench_Verified
+swe_split: test
+gate_image: python:3.12-slim
+terminal_artifacts: []
+evolve: true
+wandb:
+  project: rsi
+execution_mode: parallel

@@ -29,7 +29,8 @@ def sha(text):
 def public_rollout(result):
     # Never copy verifier scores or other backend metadata into model evidence.
     return copy.deepcopy({k: result[k] for k in
-                          ("rollout", "status", "messages", "artifact", "error")})
+                          ("rollout", "status", "messages", "artifact", "error", "skill_injected",
+                           "skill_version", "skill_script_called", "skill_script_calls", "tools_hash") if k in result})
 
 
 def _render(text, ranges):

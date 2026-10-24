@@ -13,7 +13,9 @@ runs/
 !.env.example
 .cache/
 datasets/
+_work/
 
 # Generated manifests contain paths to local EvoArena grading metadata.
-tasks/evoarena-click.json
-tasks/evoarena-validation.json
+tasks/evoarena-*.json
+tasks/splits/
+tasks/streams/

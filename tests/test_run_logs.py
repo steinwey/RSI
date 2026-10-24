@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rsi import ROOT
-from rsi.cli import load_config, main
+from rsi.config import load_config
+from rsi.cli import main
 from rsi.common import read_json, write_json
 from rsi.run_logs import create_run_directory, update_run, write_run_index
 from rsi.runner import run_experiment
@@ -13,6 +14,9 @@ from rsi.runner import run_experiment
 
 class RunLogTests(unittest.TestCase):
     def setUp(self):
+        gate = patch("rsi.runner.functional_gate", return_value={"passed": True})
+        gate.start()
+        self.addCleanup(gate.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -24,7 +28,7 @@ class RunLogTests(unittest.TestCase):
     def test_cli_automatically_names_repeated_runs_without_overwriting(self):
         with patch("rsi.cli.load_config", side_effect=lambda path: dict(self.config)), \
              patch("rsi.cli.load_tasks", return_value=[self.task]), \
-             patch("rsi.cli.validate_swe_tasks"), \
+             patch("rsi.swe.validate_swe_tasks"), \
              patch("rsi.cli.shutil.which", return_value="docker"), \
              patch("rsi.cli.os.getenv", return_value="configured"), \
              patch("rsi.run_logs._now", return_value=self.time), \
@@ -54,14 +58,14 @@ class RunLogTests(unittest.TestCase):
         directory = self.root / "custom-name"
         with patch("rsi.runner.run_group", side_effect=RuntimeError("all rollouts failed")):
             with self.assertRaisesRegex(RuntimeError, "all rollouts failed"):
-                run_experiment([self.task], [], self.config, directory)
+                run_experiment([self.task], self.config, directory)
         info = read_json(directory / "run-info.json")
         self.assertEqual(info["status"], "failed")
         self.assertIn("all rollouts failed", info["error"])
         self.assertIn("报错中止", (self.root / "INDEX.md").read_text())
         self.assertTrue((directory / "config.json").exists())
         with self.assertRaises(FileExistsError):
-            run_experiment([self.task], [], self.config, directory)
+            run_experiment([self.task], self.config, directory)
 
     def test_legacy_runs_are_indexed_without_changing_existing_logs(self):
         legacy = self.root / "swe-12907"
@@ -80,21 +84,29 @@ class RunLogTests(unittest.TestCase):
         self.assertIn("old-score-check/score.json", index)
 
     def test_latest_scoring_check_does_not_hide_the_latest_benchmark(self):
-        benchmark = create_run_directory([self.task], [], self.config, runs_dir=self.root)
-        score = create_run_directory([self.task], [], self.config, runs_dir=self.root, kind="score-check")
+        benchmark = create_run_directory([self.task], self.config, runs_dir=self.root)
+        score = create_run_directory([self.task], self.config, runs_dir=self.root, kind="score-check")
         update_run(score, status="completed")
         latest = read_json(self.root / "latest.json")
         self.assertEqual(Path(latest["benchmark"]["path"]), benchmark)
         self.assertEqual(Path(latest["score-check"]["path"]), score)
-        self.assertEqual(latest["benchmark"]["mode"], "propose")
+        self.assertEqual(latest["benchmark"]["mode"], "evolve")
         self.assertEqual(latest["score-check"]["status"], "completed")
         self.assertIsNone(read_json(score / "run-info.json")["trajectory_pattern"])
+
+    def test_single_run_metadata_matches_trajectory_count(self):
+        self.config.update(execution_mode="single", rollouts=1)
+        directory = create_run_directory([self.task], self.config, runs_dir=self.root)
+        info = read_json(directory / "run-info.json")
+        self.assertEqual(info["execution_mode"], "single")
+        self.assertEqual(info["rollouts"], 1)
+        self.assertEqual(info["trajectory_pattern"], "<task_id>/rollout-<0..0>/trajectory.json")
 
     def test_finished_experiment_with_unknown_score_is_labelled_unscored(self):
         directory = self.root / "unscored-run"
         with patch("rsi.runner.run_group", return_value=({"success": None, "tokens": 10, "seconds": 1}, [])), \
              patch("rsi.runner.induce", return_value={"changes": {}, "memory_items": []}):
-            run_experiment([self.task], [], self.config, directory)
+            run_experiment([self.task], self.config, directory)
         info = read_json(directory / "run-info.json")
         self.assertEqual(info["status"], "unscored")
         self.assertEqual(info["scored_tasks"], 0)

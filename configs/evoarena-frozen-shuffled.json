@@ -1,0 +1,42 @@
+{
+  "name": "evoarena-frozen-v3",
+  "goal": "Fix repository membership and language counts, then shuffle repository blocks independently within train and test",
+  "dataset_revision": "f98ba6aed4c1a40c527f6d70c186a6887888a332",
+  "selection": "One longest original complete chain per repository; require full unique-task coverage",
+  "repositories": {
+    "train": [
+      "argoproj/argo-workflows",
+      "pallets/click",
+      "sqlfluff/sqlfluff",
+      "cli/cli",
+      "coredns/coredns",
+      "grafana/loki"
+    ],
+    "test": [
+      "containerd/containerd",
+      "gofiber/fiber",
+      "istio/istio",
+      "pytest-dev/pytest"
+    ],
+    "reserve": ["nats-io/nats-server", "prometheus/prometheus"]
+  },
+  "expected_language_tasks": {
+    "train": {"go": 45, "python": 25},
+    "test": {"go": 40, "python": 5},
+    "reserve": {"go": 30}
+  },
+  "repository_order_seeds": {"train": 0, "test": 0},
+  "require_cached_partitions": ["train", "test"],
+  "training_prefix_repository_counts": [4, 5, 6],
+  "skill_policy": {"train": "evolve_across_chains", "test": "load_training_artifact_and_freeze", "reserve": "not_run"},
+  "rationale": [
+    "Freeze repository membership and language counts before experiments; do not resample the split when changing order seeds.",
+    "Keep both Go and Python in training and testing, with whole repositories assigned to one partition only.",
+    "Use fully cached repositories because local storage cannot accommodate the remaining environments.",
+    "Sort repository names canonically, then shuffle independently within each seeded partition; preserve each original chain's chronology.",
+    "Use the same frozen task manifests for all methods and skill controls; retain exact original task and grading metadata.",
+    "Report checkpoints after four, five and six complete training repositories; their task counts follow the seeded order.",
+    "Keep incomplete nats-server and prometheus repositories in reserve, including the two already cached nats tasks.",
+    "This resource-constrained pilot preserves the previous 70/45 membership and does not establish broad multilingual generalization."
+  ]
+}

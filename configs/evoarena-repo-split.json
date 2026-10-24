@@ -1,0 +1,27 @@
+{
+  "name": "evoarena-repo-v1",
+  "goal": "Transfer a shared coding skill to repositories excluded from skill training",
+  "dataset_revision": "f98ba6aed4c1a40c527f6d70c186a6887888a332",
+  "selection": "One longest original complete chain per repository; require full unique-task coverage",
+  "repositories": {
+    "train": [
+      "argoproj/argo-workflows",
+      "pallets/click",
+      "coredns/coredns",
+      "sqlfluff/sqlfluff",
+      "cli/cli",
+      "grafana/loki",
+      "nats-io/nats-server"
+    ],
+    "dev": ["containerd/containerd", "istio/istio"],
+    "test": ["gofiber/fiber", "prometheus/prometheus", "pytest-dev/pytest"]
+  },
+  "rationale": [
+    "Repositories used in earlier development runs are assigned to train.",
+    "Keep all chains and repeated occurrences of a repository in one partition.",
+    "Preserve the only development-unseen Python repository (pytest) for final testing.",
+    "Keep two Go repositories for development; this dataset cannot provide unseen Python repositories in both dev and test after prior development exposure.",
+    "Test spans a Go web framework, Go monitoring software and a Python test framework.",
+    "Assignment uses repository identity, language and prior development exposure, not correctness, patch contents or cache availability."
+  ]
+}

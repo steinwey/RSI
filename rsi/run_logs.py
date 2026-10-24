@@ -18,19 +18,23 @@ def _slug(value, limit=24):
     return re.sub(r"[^\w.-]+", "-", value).strip(".-_")[:limit] or "unnamed"
 
 
-def create_run_directory(tasks, validation, config, output=None, *, runs_dir=None,
-                         label=None, kind="benchmark"):
+def create_run_directory(tasks, config, output=None, *, runs_dir=None,
+                         label=None, kind="benchmark", initial_skill=None):
+    if kind in ("benchmark", "train-test") and initial_skill is None:
+        from .skills import load_initial_skill
+        _, initial_skill = load_initial_skill(config.get("initial_skill"))
     started = _now()
     benchmarks = {task["benchmark"] for task in tasks}
     benchmark = next(iter(benchmarks)) if len(benchmarks) == 1 else "mixed"
-    mode = ("evolve" if validation else "propose") if config["evolve"] else "fixed"
+    mode = "evolve" if config["evolve"] else "fixed"
     if kind != "benchmark":
         mode = kind
     config_version = digest(config)
     code_version = digest(file_map(ROOT / "rsi"))
-    skill_version = digest(file_map(ROOT / "skills/test-and-diagnose"))
+    skill_version = (initial_skill["version"] if initial_skill is not None
+                     else digest(file_map(ROOT / "skills/test-and-diagnose")))
     version = digest({"kind": kind, "config": config_version, "code": code_version,
-                      "skill": skill_version, "tasks": tasks, "validation": validation})[:8]
+                      "skill": skill_version, "tasks": tasks})[:8]
     model = config["model"]["name"]
     if output is not None:
         directory = Path(output).resolve()
@@ -54,16 +58,19 @@ def create_run_directory(tasks, validation, config, output=None, *, runs_dir=Non
     write_json(directory / "run-info.json", {
         "started_at": started.isoformat(timespec="seconds"), "timezone": "Asia/Shanghai",
         "kind": kind, "benchmark": benchmark, "mode": mode, "label": label,
-        "model": model, "task_count": len(tasks), "validation_count": len(validation),
+        "execution_mode": config.get("execution_mode", "parallel"),
+        "rollouts": config["rollouts"],
+        "model": model, "task_count": len(tasks),
+        "task_manifest_version": digest(tasks),
         "task_ids": [task["id"] for task in tasks],
-        "validation_ids": [task["id"] for task in validation],
         "chain_ids": list(dict.fromkeys(t["chain"]["id"] for t in tasks if t.get("chain"))),
         "experiment_version": version, "config_version": config_version,
         "code_version": code_version,
-        "initial_skill_version": skill_version if kind == "benchmark" else None,
-        "current_skill_version": skill_version if kind == "benchmark" else None,
+        "initial_skill_version": skill_version if kind in ("benchmark", "train-test") else None,
+        "initial_skill_source": initial_skill if kind in ("benchmark", "train-test") else None,
+        "current_skill_version": skill_version if kind in ("benchmark", "train-test") else None,
         "status": "running", "completed_tasks": 0,
-        "trajectory_pattern": "<task_id>/rollout-<0..4>/trajectory.json" if kind == "benchmark" else None,
+        "trajectory_pattern": f"<task_id>/rollout-<0..{config['rollouts'] - 1}>/trajectory.json" if kind == "benchmark" else None,
     })
     write_run_index(directory.parent)
     return directory
@@ -141,24 +148,28 @@ def write_run_index(root):
     def link(directory, filename, title):
         return f"[{title}]({quote(directory + '/' + filename)})"
 
-    modes = {"fixed": "固定技能", "propose": "仅提议修改", "evolve": "验证后更新", "score-check": "单独评分"}
+    modes = {"fixed": "固定技能", "propose": "仅提议修改", "evolve": "固定检查后更新", "score-check": "单独评分",
+             "train-test": "训练后冻结测试"}
     statuses = {"running": "运行中", "completed": "已完成", "failed": "报错中止",
                 "interrupted": "已中断", "incomplete": "未完成", "unscored": "评分未完成"}
     lines = ["# 实验日志索引", "", "自动更新；时间为北京时间（UTC+08:00）。最新指最近启动的运行。", ""]
-    for kind, title in (("benchmark", "最近的完整实验流程"), ("score-check", "最近的单独评分")):
+    for kind, title in (("train-test", "最近的训练／测试流程"), ("benchmark", "最近的完整实验流程"),
+                        ("score-check", "最近的单独评分")):
         if kind in latest:
             entry = latest[kind]
             target = next(filename for filename in
-                          ("run-info.json", "summary.json", "score.json", "tasks.json", "logs/")
+                          ("workflow.json", "run-info.json", "summary.json", "score.json", "tasks.json", "logs/")
                           if (root / entry["directory"] / filename).exists())
             lines += [f"- {title}：{link(entry['directory'], target, entry['directory'])}（{statuses.get(entry['status'], entry['status'])}）"]
-    lines += ["", "| 开始时间 | 目录 | 模式 | 模型 | 执行题 / 验证题 | 状态 | 实验版本 / 当前技能 | 查看 |",
+    lines += ["", "| 开始时间 | 目录 | 模式 | 模型 | 任务数 | 状态 | 实验版本 / 当前技能 | 查看 |",
               "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for entry in entries:
         name = entry["directory"]
         directory = root / name
         links = [link(name, filename, title) for filename, title in
-                 (("run-info.json", "运行信息"), ("summary.json", "汇总"), ("score.json", "评分"),
+                 (("workflow.json", "训练／测试汇总"), ("run-info.json", "运行信息"),
+                  ("train/run-info.json", "训练"), ("test/run-info.json", "测试"),
+                  ("summary.json", "汇总"), ("score.json", "评分"),
                   ("skills/current.json", "当前技能"), ("config.json", "配置")) if (directory / filename).exists()]
         if (directory / "logs").exists():
             links.append(link(name, "logs/", "评分日志"))
@@ -166,12 +177,12 @@ def write_run_index(root):
         skill = entry.get("current_skill_version") or "—"
         values = [entry["started_at"].replace("T", " ").replace("+08:00", ""), name,
                   modes.get(entry["mode"], entry["mode"]), entry["model"],
-                  f"{entry['task_count']} / {entry['validation_count']}",
+                  entry["task_count"],
                   statuses.get(entry["status"], entry["status"]), f"{version} / {skill}", " · ".join(links)]
         lines.append("| " + " | ".join(str(v).replace("|", "\\|").replace("\n", " ") for v in values) + " |")
     lines += ["", "目录名中的 v- 是实验版本（代码、配置、初始技能和任务清单的指纹），技能版本单独记录。",
-              "模式：fixed 固定技能；propose 仅保存候选；evolve 使用独立验证题决定是否启用候选。",
-              "五路轨迹位于各实验的 <task_id>/rollout-0 到 rollout-4/trajectory.json；技能历史位于 skills/history.jsonl。",
+              "模式：fixed 固定技能；propose 仅保存候选；evolve 按运行记录中的 skill_update_policy 启用候选；当前只演化文档，旧运行的验证记录保留。",
+              "轨迹位于各实验的 <task_id>/rollout-N/trajectory.json，路数见 run-info.json 的 rollouts；技能历史位于 skills/history.jsonl。",
               "历史目录未移动；没有运行元数据的历史记录，其时间和状态按现有文件推断。", ""]
     _atomic_text(root / "INDEX.md", "\n".join(lines))
     return entries

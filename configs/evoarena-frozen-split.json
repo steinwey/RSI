@@ -1,0 +1,35 @@
+{
+  "name": "evoarena-frozen-v2",
+  "goal": "Evolve a shared skill on training tasks, then freeze it on held-out repositories",
+  "dataset_revision": "f98ba6aed4c1a40c527f6d70c186a6887888a332",
+  "selection": "One longest original complete chain per repository; require full unique-task coverage",
+  "repositories": {
+    "train": [
+      "argoproj/argo-workflows",
+      "pallets/click",
+      "sqlfluff/sqlfluff",
+      "cli/cli",
+      "coredns/coredns",
+      "grafana/loki"
+    ],
+    "test": [
+      "containerd/containerd",
+      "gofiber/fiber",
+      "istio/istio",
+      "pytest-dev/pytest"
+    ],
+    "reserve": ["nats-io/nats-server", "prometheus/prometheus"]
+  },
+  "require_cached_partitions": ["train", "test"],
+  "training_prefix_lengths": [40, 55, 70],
+  "skill_policy": {"train": "evolve_across_chains", "test": "load_training_artifact_and_freeze", "reserve": "not_run"},
+  "rationale": [
+    "Use fully cached repositories because local storage cannot accommodate the remaining environments.",
+    "Increase training from four repositories/40 tasks to six repositories/70 tasks, adding Go DNS and logging experience.",
+    "Keep four separate repositories/45 tasks for frozen evaluation, covering Go and Python.",
+    "Hold whole repositories together; preserve original complete chains and grading metadata.",
+    "Do not run the two cached nats tasks as a truncated chain or mix its other tasks into test.",
+    "Training prefixes end on chain boundaries; report all chosen checkpoints on the same test set rather than choosing the best from test scores.",
+    "This resource-constrained pilot split does not replace the original full dataset or demonstrate broad multilingual generalization."
+  ]
+}

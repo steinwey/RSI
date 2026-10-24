@@ -155,12 +155,12 @@ def prepare_tasks(root, chain_ids, output):
     return tasks
 
 
-def validate_order(tasks, validation=()):
+def validate_order(tasks, heldout=()):
     """Require whole chains and prevent held-out milestones leaking into training."""
-    if any(t["benchmark"] == "swe-evo" for t in list(tasks) + list(validation)):
-        if any(t["benchmark"] != "swe-evo" for t in list(tasks) + list(validation)):
-            raise ValueError("Use separate complete EvoArena chains for both training and validation")
-    for group in (tasks, validation):
+    if any(t["benchmark"] == "swe-evo" for t in list(tasks) + list(heldout)):
+        if any(t["benchmark"] != "swe-evo" for t in list(tasks) + list(heldout)):
+            raise ValueError("Use separate complete EvoArena chains for training and held-out evaluation")
+    for group in (tasks, heldout):
         chains, finished = {}, set()
         previous = None
         for task in group:
@@ -181,11 +181,11 @@ def validate_order(tasks, validation=()):
             if length != len(steps) or any(s["length"] != length for s in steps) or [s["index"] for s in steps] != list(range(length)):
                 raise ValueError("Supply complete chains in chronological step order")
     training = {t["chain"]["source_instance_id"] for t in tasks if t.get("chain")}
-    heldout = {t["chain"]["source_instance_id"] for t in validation if t.get("chain")}
+    heldout_ids = {t["chain"]["source_instance_id"] for t in heldout if t.get("chain")}
     train_chains = {t["chain"]["id"] for t in tasks if t.get("chain")}
-    val_chains = {t["chain"]["id"] for t in validation if t.get("chain")}
-    if training & heldout or train_chains & val_chains:
-        raise ValueError("Training and validation chains must not share milestones or chain IDs")
+    heldout_chains = {t["chain"]["id"] for t in heldout if t.get("chain")}
+    if training & heldout_ids or train_chains & heldout_chains:
+        raise ValueError("Training and held-out chains must not share milestones or chain IDs")
 
 
 def evaluation_rows(tasks):
@@ -359,7 +359,7 @@ def verify_references(tasks, config, output=None):
     from .run_logs import create_run_directory, update_run
     rows = evaluation_rows(tasks)
     config = {**config, "swe_dataset": DATASET}
-    output = create_run_directory(tasks, [], config, output, label="evo-reference", kind="score-check")
+    output = create_run_directory(tasks, config, output, label="evo-reference", kind="score-check")
     reports = []
     try:
         for task in tasks:

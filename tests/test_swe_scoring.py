@@ -1,6 +1,7 @@
 import copy
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,8 @@ from unittest.mock import patch
 
 from rsi import ROOT
 from rsi.backends import SWEBackend, harness_command, isolate_eval_network
-from rsi.cli import load_config, main
+from rsi.config import load_config
+from rsi.cli import main
 from rsi.common import write_json
 from rsi.swe import evaluation_dataset_name, validate_swe_tasks
 
@@ -144,6 +146,32 @@ class SWEScoringTests(unittest.TestCase):
              patch("rsi.backends.subprocess.run", return_value=result):
             score = self.backend().score("candidate patch")
         self.assertEqual(score, {"success": True, "report": str(path)})
+
+    def test_harness_child_uses_utf8_even_when_parent_was_started_with_x_flag(self):
+        command = harness_command(self.config, self.root / "predictions.json", self.task["id"], "test")
+        self.assertEqual(command[:4], [sys.executable, "-X", "utf8", "-c"])
+
+    def test_non_utf8_diagnostics_do_not_discard_the_official_report(self):
+        path = self.report("rsi-" + "a" * 12, resolved=False)
+        command = [sys.executable, "-X", "utf8", "-c",
+                   "import os; os.write(1, '\\u8bc4\\u6d4b\\u5b8c\\u6210\\n'.encode('utf-8')); "
+                   "os.write(2, b'legacy diagnostic: \\xff\\n')"]
+        with patch("rsi.backends.uuid.uuid4", return_value=SimpleNamespace(hex="a" * 32)), \
+             patch("rsi.backends.harness_command", return_value=command):
+            score = self.backend().score("candidate patch")
+        self.assertEqual(score, {"success": False, "report": str(path)})
+        log = (self.root / "evaluation.log").read_text(encoding="utf-8")
+        self.assertIn("\u8bc4\u6d4b\u5b8c\u6210", log)
+        self.assertIn("legacy diagnostic: \ufffd", log)
+
+    def test_absent_diagnostic_stream_does_not_discard_the_official_report(self):
+        path = self.report("rsi-" + "a" * 12)
+        result = subprocess.CompletedProcess([], 0, "evaluation complete", None)
+        with patch("rsi.backends.uuid.uuid4", return_value=SimpleNamespace(hex="a" * 32)), \
+             patch("rsi.backends.subprocess.run", return_value=result):
+            score = self.backend().score("candidate patch")
+        self.assertEqual(score, {"success": True, "report": str(path)})
+        self.assertEqual((self.root / "evaluation.log").read_text(), "evaluation complete")
 
     def test_infrastructure_failure_does_not_become_a_failed_solution(self):
         self.report("rsi-" + "a" * 12, resolved=False, infra_failure=True,

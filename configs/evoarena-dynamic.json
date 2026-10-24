@@ -1,0 +1,32 @@
+{
+  "name": "evoarena-dynamic-v1",
+  "dataset_revision": "f98ba6aed4c1a40c527f6d70c186a6887888a332",
+  "protocol": "Online solve-score-update; skill persists for the entire run",
+  "development_repositories": [
+    "argoproj/argo-workflows",
+    "pallets/click",
+    "sqlfluff/sqlfluff",
+    "cli/cli"
+  ],
+  "benchmark_repositories": [
+    "containerd/containerd",
+    "coredns/coredns",
+    "gofiber/fiber",
+    "grafana/loki",
+    "istio/istio",
+    "nats-io/nats-server",
+    "prometheus/prometheus",
+    "pytest-dev/pytest"
+  ],
+  "order_seeds": [0, 1, 2],
+  "primary_seed": 0,
+  "selection": "One longest original complete chain per repository, requiring full unique-task coverage",
+  "rationale": [
+    "Separate previously used development repositories from the primary online benchmark.",
+    "The benchmark adapts after each scored task rather than freezing skill throughout a static test set.",
+    "Shuffle complete repository blocks using predefined seeds; keep original milestone order inside every block.",
+    "Use each unique task once in a primary run so overlapping chains do not create replay or historical backtracking.",
+    "Retain every original chain in separate full-chains manifests for explicit replay experiments.",
+    "Optional warmup and benchmark must run in the same invocation to preserve skill; keep warmup scores separate."
+  ]
+}

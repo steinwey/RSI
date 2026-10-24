@@ -11,7 +11,8 @@ from rsi.command_logs import RecordingEnvironment
 from rsi.common import read_json
 from rsi.evidence import archive_request, build_evidence, serialized, sha
 from rsi.model import Model, object_messages
-from rsi.runner import induce, solver_step_limit_note
+from rsi.runner import solver_step_limit_note
+from rsi.evolution import induce
 from rsi import ROOT
 
 

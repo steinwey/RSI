@@ -6,8 +6,9 @@ from pathlib import Path
 
 from rsi import ROOT
 from rsi.common import file_map
-from rsi.runner import induce, skill_prompt, skill_usage
-from rsi.skills import SkillStore
+from rsi.runner import skill_prompt
+from rsi.evolution import induce, skill_usage
+from rsi.skills import SkillStore, document_gate, MAX_FILE_CHARS
 
 CHECKS = ROOT / "skills/test-and-diagnose/tests/check_skill.py"
 GOOD_SCRIPT = '''"""List test files."""
@@ -34,47 +35,26 @@ class SkillUpdateTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(CHECKS), str(candidate)], capture_output=True,
                               text=True, timeout=300)
 
-    def test_new_scripts_can_be_added_and_deleted(self):
-        candidate, diff = self.store.propose({"scripts/find_tests.py": GOOD_SCRIPT,
-                                              "SKILL.md": self.guide + "\nUse find_tests.py to list tests.\n"})
-        self.assertIn("scripts/find_tests.py", file_map(candidate))
-        self.assertIn("+print(json.dumps", diff)
-        self.store.record(candidate, True, {})
-        removed, _ = self.store.propose({"scripts/find_tests.py": None})
-        self.assertNotIn("scripts/find_tests.py", file_map(removed))
-        self.assertIn("tests/check_skill.py", file_map(removed))
+    def test_tool_add_edit_delete_and_paths_are_rejected(self):
+        for path in ("scripts/find_tests.py", "scripts/inspect_project.py", "../SKILL.md",
+                     "tests/check_skill.py", "scripts/sub/tool.py"):
+            for value in (GOOD_SCRIPT, None):
+                with self.subTest(path=path, value=value), self.assertRaises(ValueError):
+                    self.store.propose({path: value})
 
-    def test_required_files_paths_and_script_count_are_enforced(self):
-        for path in ("SKILL.md", "scripts/inspect_project.py"):
-            with self.assertRaisesRegex(ValueError, "cannot be deleted"):
-                self.store.propose({path: None})
-        for path in ("scripts/sub/tool.py", "scripts/1tool.py", "scripts/tool.sh", "tests/check_skill.py"):
-            with self.assertRaisesRegex(ValueError, "may be changed"):
-                self.store.propose({path: "pass"})
-        with self.assertRaisesRegex(ValueError, "At most 8"):
-            self.store.propose({f"scripts/tool_{i}.py": "pass" for i in range(8)})
-        with self.assertRaises(SyntaxError):
-            self.store.propose({"scripts/broken.py": "def :"})
-
-    def test_fixed_checks_accept_documented_read_only_script(self):
-        result = self.gate({"scripts/find_tests.py": GOOD_SCRIPT,
-                            "SKILL.md": self.guide + "\nUse find_tests.py to list tests.\n"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("2 scripts", result.stdout)
-
-    def test_fixed_checks_reject_unsafe_or_undocumented_scripts(self):
-        writer = GOOD_SCRIPT.replace("print(", "(root / 'created.txt').write_text('x'); print(")
-        crash = GOOD_SCRIPT.replace("print(", "raise RuntimeError('boom'); print(")
-        cases = {"undocumented": ({"scripts/find_tests.py": GOOD_SCRIPT}, "does not describe"),
-                 "writes": ({"scripts/find_tests.py": writer}, "modified"),
-                 "crashes": ({"scripts/find_tests.py": crash}, "crashed")}
-        for name, (changes, message) in cases.items():
-            with self.subTest(name):
-                if name != "undocumented":
-                    changes = {**changes, "SKILL.md": self.guide + "\nUse find_tests.py to list tests.\n"}
-                result = self.gate(changes)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(message, result.stderr)
+    def test_document_validation_and_fixed_tool_hash(self):
+        for guide in (None, "", "   ", "x" * (MAX_FILE_CHARS + 1), "Use scripts/missing.py"):
+            with self.subTest(guide=str(guide)[:20]), self.assertRaises(ValueError):
+                self.store.propose({"SKILL.md": guide})
+        candidate, _ = self.store.propose({"SKILL.md": self.guide + "\nReproduce first."})
+        gate = document_gate(candidate, self.store.fixed_files)
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["tools_hash"], self.store.tools_hash)
+        self.assertEqual({k: v for k, v in file_map(candidate).items() if k != "SKILL.md"}, self.store.fixed_files)
+        (candidate / "scripts/inspect_project.py").write_text("pass")
+        self.assertFalse(document_gate(candidate, self.store.fixed_files)["passed"])
+        with self.assertRaises(ValueError):
+            self.store.record(candidate, True, {})
 
     def test_solver_prompt_lists_tools_and_does_not_interpret_guide_as_template(self):
         candidate, _ = self.store.propose({"SKILL.md": "Literal {{ not_a_variable }} guide with inspect_project.py"})
@@ -91,9 +71,12 @@ class SkillUpdateTests(unittest.TestCase):
                     {"role": "assistant", "content": "```bash\nls\n```"}]
         results = [{"rollout": 0, "status": "Submitted", "error": None, "messages": messages, "artifact": ""},
                    {"rollout": 1, "status": "Submitted", "error": None, "messages": messages[:2], "artifact": ""}]
+        call = {"message": 2, "sequence": 1, "scripts": ["scripts/inspect_project.py"],
+                "returncode": 0, "error": None}
+        results[0]["skill_script_calls"] = [call]
         self.assertEqual(skill_usage(results), [
-            {"rollout": 0, "calls": [{"message": 2, "scripts": ["scripts/inspect_project.py"], "returncode": 0}]},
-            {"rollout": 1, "calls": []}])
+            {"rollout": 0, "source": "command_log", "calls": [call]},
+            {"rollout": 1, "source": "unavailable", "calls": []}])
         seen = {}
         class Updater:
             def __init__(self, config):
@@ -105,9 +88,12 @@ class SkillUpdateTests(unittest.TestCase):
                 return {}
         induce({"prompt": "fix"}, results, self.store.current(), {"judge_model": {}, "step_limit": 30}, Updater)
         self.assertEqual(set(seen["data"]["current_skill"]), {"SKILL.md", "scripts/inspect_project.py"})
+        budget = seen["data"]["skill_document_budget"]
+        self.assertEqual(budget["current_characters"], len(self.guide))
+        self.assertEqual(budget["remaining_characters"], MAX_FILE_CHARS - len(self.guide))
         self.assertEqual(seen["data"]["skill_usage"][0]["calls"][0]["returncode"], 0)
-        self.assertIn("add new scripts", seen["instruction"])
-        self.assertIn("null to delete", seen["instruction"])
+        self.assertIn("Only SKILL.md may be changed", seen["instruction"])
+        self.assertIn("Do not add, rewrite or delete scripts", seen["instruction"])
         self.assertIn("Put a repeated procedure into SKILL.md", seen["instruction"])
         self.assertNotIn("memory_items", seen["instruction"])
         self.assertNotIn("websites", seen["instruction"])

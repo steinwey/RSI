@@ -1,28 +1,35 @@
-# Same model/budgets as deepseek.yaml, using official SWE-Chain-Evo task chains.
+provider: qwen-token-plan
+allowed_models:
+- qwen3.8-max
 model:
-  name: deepseek/deepseek-flash
+  name: qwen3.8-max
+  provider: qwen-token-plan
+  custom_llm_provider: openai
+  api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_TOKEN_PLAN_API_KEY
   extra_body:
-    thinking:
-      type: disabled
+    enable_thinking: false
   temperature: 0.7
   max_tokens: 4096
   timeout: 120
   num_retries: 2
 judge_model:
-  name: deepseek/deepseek-flash
-  extra_body:
-    thinking:
-      type: disabled
+  name: qwen3.8-max
+  provider: qwen-token-plan
+  custom_llm_provider: openai
+  api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_TOKEN_PLAN_API_KEY
+  extra_body: &id001
+    enable_thinking: false
   temperature: 0.0
   max_tokens: 8192
   timeout: 180
   num_retries: 2
 rollouts: 5
-# Optional task-local planning; uses judge_model unless planner_model is supplied.
 planner_enabled: false
-step_limit: 30
+step_limit: 60
 cost_limit: 3.0
-command_timeout: 60
+command_timeout: 180
 image_pull_timeout: 7200
 rollout_timeout: 1800
 evaluation_timeout: 1800
@@ -31,7 +38,20 @@ swe_split: validation
 gate_image: python:3.12-slim
 terminal_artifacts: []
 evolve: true
-embedding_model: null
-# Upload is controlled by run --wandb / --no-wandb, default off.
 wandb:
   project: rsi
+reflection_enabled: true
+reflection_max_rounds: 5
+reflection_step_limit: 20
+reflection_model:
+  name: qwen3.8-max
+  provider: qwen-token-plan
+  custom_llm_provider: openai
+  api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_TOKEN_PLAN_API_KEY
+  extra_body: *id001
+  temperature: 0.0
+  max_tokens: 8192
+  timeout: 180
+  num_retries: 2
+execution_mode: parallel

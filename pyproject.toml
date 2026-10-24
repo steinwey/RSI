@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rsi-bench-agent"
 version = "0.1.0"
-description = "Five-rollout ReasoningBank agent with versioned executable skills"
+description = "Coding-agent skill document evolution with train and frozen-test workflows"
 requires-python = ">=3.11"
 dependencies = ["pyyaml", "jinja2", "python-dotenv", "platformdirs", "rich", "litellm>=1.75.5", "datasets", "wandb"]
 

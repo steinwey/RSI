@@ -2,27 +2,38 @@
 import os
 
 TRACKED_KEYS = (
-    "rollouts", "step_limit", "cost_limit", "command_timeout", "image_pull_timeout", "rollout_timeout",
+    "execution_mode", "rollouts", "step_limit", "cost_limit", "command_timeout", "image_pull_timeout", "rollout_timeout",
     "evaluation_timeout", "swe_dataset", "swe_split", "gate_image",
-    "evolve", "embedding_model",
+    "evolve", "planner_enabled", "reflection_enabled", "reflection_max_rounds", "reflection_step_limit",
 )
 
 
 def _model_view(prefix, config):
     thinking = (config.get("extra_body") or {}).get("thinking") or {}
-    return {
+    view = {
         f"{prefix}/name": config.get("name"),
         f"{prefix}/temperature": config.get("temperature"),
         f"{prefix}/max_tokens": config.get("max_tokens"),
         f"{prefix}/timeout": config.get("timeout"),
         f"{prefix}/num_retries": config.get("num_retries"),
         f"{prefix}/thinking": thinking.get("type"),
+        f"{prefix}/enable_thinking": (config.get("extra_body") or {}).get("enable_thinking"),
     }
+    for key in ("provider", "custom_llm_provider", "api_base", "reasoning_effort"):
+        if config.get(key):
+            view[f"{prefix}/{key}"] = config[key]
+    return view
 
 
 def public_config(config):
     """Hyperparameters safe to leave the machine. Secrets and task text are omitted."""
     published = {key: config.get(key) for key in TRACKED_KEYS}
+    published["skill_update_policy"] = "document_only_fixed_tools"
+    published["skill_scope"] = "run"
+    if config.get("planner_model"):
+        published.update(_model_view("planner_model", config["planner_model"]))
+    if config.get("reflection_model"):
+        published.update(_model_view("reflection_model", config["reflection_model"]))
     published["terminal_artifacts"] = list(config.get("terminal_artifacts") or [])
     published.update(_model_view("model", config["model"]))
     published.update(_model_view("judge_model", config["judge_model"]))
@@ -63,6 +74,17 @@ def token_metrics(reports):
     }
 
 
+def _chain_ratio(rows):
+    """Chain accuracy: every milestone counts, solved count divided by the declared length."""
+    length = rows[0]["chain"]["length"]
+    if length <= 0:
+        return 0.0
+    by_index = {row["chain"]["index"]: row for row in rows}
+    solved = sum(1 for index in range(length)
+                 if (row := by_index.get(index)) is not None and row.get("success") is True)
+    return solved / length
+
+
 def chain_metrics(reports):
     groups = {}
     for report in reports:
@@ -70,14 +92,17 @@ def chain_metrics(reports):
             groups.setdefault(report["chain"]["id"], []).append(report)
     if not groups:
         return {}
+    ratios = {cid: _chain_ratio(rows) for cid, rows in groups.items()}
     complete = [rows for rows in groups.values()
                 if len(rows) == rows[0]["chain"]["length"]
                 and {r["chain"]["index"] for r in rows} == set(range(rows[0]["chain"]["length"]))]
     scored = [rows for rows in complete if all(r["success"] is not None for r in rows)]
-    resolved = sum(all(r["success"] is True for r in rows) for rows in scored)
+    scored_ids = {rows[0]["chain"]["id"] for rows in scored}
+    resolved = sum(ratio == 1 for ratio in ratios.values())
     return {"chains": len(groups), "completed_chains": len(complete), "scored_chains": len(scored),
-            "resolved_chains": resolved, "chain_accuracy": resolved / len(groups),
-            "chain_scored_accuracy": resolved / len(scored) if scored else None,
+            "resolved_chains": resolved, "chain_accuracy": sum(ratios.values()) / len(groups),
+            "chain_scored_accuracy": (sum(ratios[cid] for cid in scored_ids) / len(scored_ids)
+                                      if scored_ids else None),
             "chain_scoring_coverage": len(scored) / len(groups),
             "step_accuracy": scoring_metrics(reports)["resolution_rate"]}
 
@@ -86,6 +111,7 @@ def task_metrics(task, report, update):
     usage = report.get("selector_usage") or {}
     row = {
         "task_id": report["task_id"],
+        "execution_mode": report.get("execution_mode", "parallel"),
         "benchmark": task.get("benchmark"),
         "selected": report["selected"],
         "tokens": report["tokens"],
@@ -99,11 +125,22 @@ def task_metrics(task, report, update):
         "selector/output_tokens": usage.get("output_tokens"),
         "selector/cost_usd": usage.get("cost_usd"),
     }
+    if report.get("reflection_usage"):
+        row.update({f"reflection/{k}": v for k, v in report["reflection_usage"].items()})
+        row["reflection/revisions"] = report.get("reflection_revisions", 0)
     if report.get("success") is not None:
         row["success"] = int(bool(report["success"]))
     if report.get("chain"):
         row.update({f"chain/{key}": value for key, value in report["chain"].items()})
-    gate = update.get("functional_gate") or {}
+    row["skill_update_policy"] = update.get("acceptance_policy")
+    row["skill_update_decision"] = update.get("decision")
+    row["tools_hash"] = update.get("tools_hash") or report.get("tools_hash")
+    for key in ("skill_injected_rollouts", "skill_script_called_rollouts", "skill_script_command_attempts"):
+        if key in report:
+            row[key] = report[key]
+    gate = update.get("document_gate") or update.get("functional_gate") or {}
+    if "document_gate" in update and "passed" in gate:
+        row["document_gate_passed"] = int(bool(gate["passed"]))
     if "passed" in gate:
         row["gate_passed"] = int(bool(gate["passed"]))
     if "memory_items" in update:
@@ -127,6 +164,9 @@ def summary_metrics(reports):
         **scoring_metrics(reports),
         **chain_metrics(reports),
         **token_metrics(reports),
+        **{key: sum(r[key] for r in reports) for key in
+           ("skill_injected_rollouts", "skill_script_called_rollouts", "skill_script_command_attempts")
+           if reports and all(key in r for r in reports)},
         "seconds": sum(report["seconds"] for report in reports),
     }
 

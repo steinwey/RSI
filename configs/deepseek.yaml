@@ -1,4 +1,3 @@
-# LiteLLM DeepSeek provider. Export DEEPSEEK_API_KEY in WSL.
 model:
   name: deepseek/deepseek-flash
   extra_body:
@@ -18,23 +17,18 @@ judge_model:
   timeout: 180
   num_retries: 2
 rollouts: 5
-# Optional task-local planning; uses judge_model unless planner_model is supplied.
 planner_enabled: false
 step_limit: 30
 cost_limit: 3.0
 command_timeout: 60
-image_pull_timeout: 7200 # Image download/container startup budget, in seconds.
+image_pull_timeout: 7200
 rollout_timeout: 1800
 evaluation_timeout: 1800
 swe_dataset: SWE-bench/SWE-bench_Verified
 swe_split: test
 gate_image: python:3.12-slim
-terminal_artifacts: [] # Optional extra container paths to retain, e.g. ["/app/output"]
+terminal_artifacts: []
 evolve: true
-# null uses a lightweight lexical retrieval baseline. For paper-style semantic
-# retrieval, configure a supported LiteLLM embedding model and its credentials.
-# DeepSeek chat API does not supply the original Gemini embedding backend.
-embedding_model: null
-# Upload only with `rsi run --wandb` and WANDB_API_KEY. Do not save the key here.
 wandb:
   project: rsi
+execution_mode: parallel
